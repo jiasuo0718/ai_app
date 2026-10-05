@@ -27,7 +27,9 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build release APK
+      - name: Setup local.properties
+        run: echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
+        - name: Build release APK
         run: flutter build apk --release
 
       - name: Upload APK Artifact
