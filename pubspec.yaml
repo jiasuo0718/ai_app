@@ -18,12 +18,12 @@ dependencies:
   # 语音播放
   audioplayers: ^5.2.1
   # 录音
-  record: ^5.0.4
+  record: ^7.1.1
   # 路径管理
   path_provider: ^2.1.2
   # 权限
   permission_handler: ^11.2.0
-  # 图片选择（头像）
+  # 图片选择(头像)
   image_picker: ^1.0.7
   # UUID
   uuid: ^4.3.3
@@ -35,9 +35,4 @@ dev_dependencies:
 
 dependency_overrides:
   record_platform_interface: 1.0.2
-  record_linux: 0.7.1
-
-flutter:
-  uses-material-design: true
-  assets:
-    - assets/
+  
