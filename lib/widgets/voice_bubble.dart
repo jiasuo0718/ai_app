@@ -18,7 +18,7 @@ class VoiceBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // 语音条宽度随时长变化，最小60，最大180
-    final width = (60 + duration * 4).clamp(60.0, 180.0);
+    final width = (60.0 + duration * 4).clamp(60.0, 180.0);
     final iconColor = isUser ? Colors.white : Colors.black87;
 
     return InkWell(
