@@ -13,6 +13,17 @@ subprojects {
     project.evaluationDependsOn(':app')
 }
 
+// 为旧版 Flutter 插件提供兼容性
+subprojects { project ->
+    project.plugins.withId('com.android.library') {
+        project.android.ext.flutter = project.extensions.findByName('flutter') ?: [:]
+        project.android.compileSdkVersion 35
+    }
+    project.plugins.withId('com.android.application') {
+        project.android.ext.flutter = project.extensions.findByName('flutter') ?: [:]
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }
