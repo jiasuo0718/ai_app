@@ -16,11 +16,15 @@ subprojects {
 // 为旧版 Flutter 插件提供兼容性
 subprojects { project ->
     project.plugins.withId('com.android.library') {
-        project.android.ext.flutter = project.extensions.findByName('flutter') ?: [:]
-        project.android.compileSdkVersion 35
+        project.android.ext.flutter = [compileSdkVersion: 35, minSdkVersion: 21, targetSdkVersion: 35]
     }
     project.plugins.withId('com.android.application') {
-        project.android.ext.flutter = project.extensions.findByName('flutter') ?: [:]
+        project.android.ext.flutter = [compileSdkVersion: 35, minSdkVersion: 21, targetSdkVersion: 35]
+    }
+    project.afterEvaluate {
+        if (project.hasProperty('android')) {
+            project.android.compileSdkVersion 35
+        }
     }
 }
 
