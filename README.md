@@ -71,3 +71,4 @@ lib/
 - Release 构建已关闭 `minifyEnabled` 和 `shrinkResources`，避免 Flutter so 库崩溃和图标丢失
 - API Key 存储在本地 SharedPreferences，生产环境建议通过后端中转
 - 语音录音需要麦克风权限，首次使用会请求授权
+- GitHub Actions 云端构建
