@@ -53,15 +53,32 @@ class FirmwareSurgeryEngine {
     }
     onLog('✔ root 正常');
 
-    final tool = await NativeBridge.copyTool('assets/tools/payload-dumper-go', 'payload-dumper-go');
-    if (tool.startsWith('ERR:')) {
-      onLog('✖ 工具准备失败: $tool');
-      return null;
+    // ---- 0. 备齐捆绑的 arm64 工具 ----
+    const tools = ['payload-dumper-go', 'mkfs.erofs', 'dump.erofs', 'fsck.erofs'];
+    final toolPaths = <String, String>{};
+    for (final t in tools) {
+      final p = await NativeBridge.copyTool('assets/tools/$t', t);
+      if (p.startsWith('ERR:')) {
+        onLog('✖ 工具 $t 准备失败: $p');
+        return null;
+      }
+      toolPaths[t] = p;
+      onLog('✔ 工具就绪: $p');
     }
-    onLog('✔ 工具就绪: $tool');
+    final payloadGo = toolPaths['payload-dumper-go']!;
+    final mkfsErofs = toolPaths['mkfs.erofs']!;
+    final dumpErofs = toolPaths['dump.erofs']!;
 
-    // ---- 1. 拆包 ----
-    final unpack = await NativeBridge.exec('mkdir -p "$outDir" && "$tool" extract --partition system -o "$outDir/system" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
+    // ---- 1. 拆包: 原始 erofs 镜像(.img)用 dump.erofs, OZIP/payload 用 payload-dumper-go ----
+    final isRawImg = firmwarePath.endsWith('.img') || firmwarePath.contains('system');
+    final String unpack;
+    if (isRawImg) {
+      unpack = await NativeBridge.exec(
+          'mkdir -p "$outDir/system" && "$dumpErofs" "$firmwarePath" "$outDir/system" 2>&1 || echo UNPACK_FAIL');
+    } else {
+      unpack = await NativeBridge.exec(
+          'mkdir -p "$outDir" && "$payloadGo" extract --partition system -o "$outDir/system" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
+    }
     onLog(unpack);
 
     // ---- 2. 手术(patch) ----
@@ -75,7 +92,7 @@ class FirmwareSurgeryEngine {
     // ---- 3. 重打包(erofs) ----
     final outImg = '$outDir/system.img';
     final repack = await NativeBridge.exec(
-        'mkfs.erofs -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');
+        '"$mkfsErofs" -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');
     onLog(repack);
 
     onLog('✔ 手术结束，产物: $outImg');

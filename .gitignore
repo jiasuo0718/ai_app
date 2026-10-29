@@ -45,3 +45,4 @@ app.*.map.json
 
 # local properties (contains SDK paths)
 android/local.properties
+.build-tools/

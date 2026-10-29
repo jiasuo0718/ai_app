@@ -24,6 +24,19 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Build native tools (android/arm64)
+        run: |
+          chmod +x scripts/build-native-tools.sh
+          NDK_HOME="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/* 2>/dev/null | head -1)"
+          if [ -z "$NDK_HOME" ]; then
+            echo "无预装 NDK, 下载 r25c..."
+            wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O /tmp/ndk.zip
+            unzip -q /tmp/ndk.zip -d /opt/
+            NDK_HOME="/opt/android-ndk-r25c"
+          fi
+          echo "使用 NDK: $NDK_HOME"
+          ./scripts/build-native-tools.sh "$NDK_HOME"
+
       - name: Install dependencies
         run: flutter pub get
 
