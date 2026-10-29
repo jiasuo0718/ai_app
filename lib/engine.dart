@@ -235,14 +235,16 @@ class FirmwareSurgeryEngine {
     final newSize = blocks * k * 1024;
     onLog('解析到块数 $blocks (${k}k), 新体积 = $newSize 字节');
 
-    // 截断: 优先 Dart File.truncate, 权限不足回退 su truncate
+    // 截断: 优先 Dart File(经 RandomAccessFile.truncate), 权限不足回退 su truncate
     var truncated = false;
     try {
       final f = File(img);
       if (await f.exists()) {
-        await f.truncate(newSize);
+        final raf = await f.open(mode: FileMode.write);
+        await raf.truncate(newSize);
+        await raf.close();
         truncated = true;
-        onLog('✔ Dart File.truncate 成功');
+        onLog('✔ Dart File(RandomAccessFile).truncate 成功');
       }
     } catch (_) {}
     if (!truncated) {
