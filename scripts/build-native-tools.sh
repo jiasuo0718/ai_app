@@ -58,12 +58,30 @@ build_erofs() {
   cd "$WORK/erofs"
   ./autogen.sh
 
-  # Android 把 pthread 并入 libc, 无独立 libpthread —— 建空桩库满足 -lpthread 检查
-  if [ ! -f "$STAGE/lib/libpthread.a" ]; then
-    printf 'int _pthread_stub;\n' > "$WORK/pthread_stub.c"
-    "$TC/bin/${TARGET}${API}-clang" -c "$WORK/pthread_stub.c" -o "$WORK/pthread_stub.o"
-    "$TC/bin/llvm-ar" crs "$STAGE/lib/libpthread.a" "$WORK/pthread_stub.o"
-    echo "已创建 libpthread 空桩: $STAGE/lib/libpthread.a"
+  # ---- Android bionic 把 pthread/rt/dl 并入 libc, 无独立库 —— 建带真符号的桩库满足 -lxxx ----
+  build_stub() {
+    local name="$1"; local sym="__${name}_stub"; local tmp
+    tmp="$(mktemp -d)"
+    cat > "$tmp/stub.c" <<EOF
+/* $name stub for Android bionic: real symbols live in libc. */
+void $sym(void) {}
+EOF
+    "$TC/bin/${TARGET}${API}-clang" -c "$tmp/stub.c" -o "$tmp/stub.o"
+    "$TC/bin/llvm-ar" rcs "$STAGE/lib/lib${name}.a" "$tmp/stub.o"
+    "$TC/bin/llvm-ranlib" "$STAGE/lib/lib${name}.a"
+    rm -rf "$tmp"
+    echo "桩库: $STAGE/lib/lib${name}.a ($sym)"
+  }
+  build_stub pthread
+  build_stub rt
+  build_stub dl
+  echo "桩库符号校验:"; "$TC/bin/llvm-nm" -s "$STAGE/lib/libpthread.a" 2>/dev/null | head -3 || true
+
+  # ---- 优先 --disable-multithread(最干净) ----
+  EXTRA_CONF=()
+  if ./configure --help 2>/dev/null | grep -qi 'disable-multithread'; then
+    EXTRA_CONF+=('--disable-multithread')
+    echo ">> erofs-utils 支持 --disable-multithread, 已启用(无需线程)"
   fi
 
   export CC="$TC/bin/${TARGET}${API}-clang"
@@ -85,7 +103,9 @@ build_erofs() {
        --prefix="$STAGE" \
        --enable-static --disable-shared \
        --without-selinux --without-uuid \
+       "${EXTRA_CONF[@]+"${EXTRA_CONF[@]}"}" \
        LZ4_CFLAGS="$LZ4_CFLAGS" LZ4_LIBS="$LZ4_LIBS" \
+       ac_cv_search_pthread_create="none required" \
        > configure.out 2>&1; then
     echo "!! configure failed"; tail -n 60 configure.out
     dump_configure_failure config.log
