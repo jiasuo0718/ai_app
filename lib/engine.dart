@@ -57,6 +57,7 @@ class FirmwareSurgeryEngine {
   final void Function(String line) onLog;
 
   static const String _mnt = '/data/local/tmp/fw_mnt';
+  String? _loopDev; // 显式 losetup 绑定的 loop 设备, 卸载时 detach
 
   Future<String?> runPipeline({required String firmwarePath, required String outDir}) async {
     onLog('固件: $firmwarePath');
@@ -146,30 +147,31 @@ class FirmwareSurgeryEngine {
       return _mounted();
     }
 
-    // 尝试2: losetup 显式绑定(自动补 loop 节点, 兼容 /dev/block/loopN 与 /dev/loopN)
-    onLog('回退 losetup + mount(自动补 loop 节点)...');
-    final loopInfo = await NativeBridge.exec('ls /sys/block/ 2>/dev/null | grep -i loop || echo NO_LOOP_DEVS');
+    // 尝试2: losetup 显式绑定(扫描空闲 loop 0-63; 内核常把 loop0-7 留给系统挂载)
+    onLog('回退 losetup + mount(扫描空闲 loop 0-63)...');
+    final loopInfo = await NativeBridge.exec('ls /sys/block/ 2>/dev/null | grep -i loop | head -20 || echo NO_LOOP_DEVS');
     onLog('内核 loop 设备: ${loopInfo.trim()}');
     final losetup = await NativeBridge.exec(
-      'ok=""; '
-      'for n in 0 1 2 3 4 5 6 7; do '
+      'ok=""; err=""; '
+      'for n in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 '
+      '20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 '
+      '40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 '
+      '60 61 62 63; do '
       '[ -e /dev/block/loop\$n ] || mknod /dev/block/loop\$n b 7 \$n 2>/dev/null; '
       '[ -e /dev/loop\$n ] || mknod /dev/loop\$n b 7 \$n 2>/dev/null; '
-      'if losetup /dev/block/loop\$n "$img" 2>/dev/null; then '
-      'if mount -t ext4 -o rw /dev/block/loop\$n \$_mnt 2>/dev/null; then '
-      'echo "LOOPOK:/dev/block/loop\$n"; ok=1; break; '
-      'else losetup -d /dev/block/loop\$n 2>/dev/null; fi; fi; '
-      'if [ -e /dev/loop\$n ] && losetup /dev/loop\$n "$img" 2>/dev/null; then '
-      'if mount -t ext4 -o rw /dev/loop\$n \$_mnt 2>/dev/null; then '
-      'echo "LOOPOK:/dev/loop\$n"; ok=1; break; '
-      'else losetup -d /dev/loop\$n 2>/dev/null; fi; fi; '
-      'done; '
-      '[ -z "\$ok" ] && { echo "LOSETUP_ERR:"; losetup /dev/block/loop0 "$img" 2>&1 | head -3; '
-      'mount -t ext4 -o rw /dev/block/loop0 \$_mnt 2>&1 | head -3; }; '
+      'for d in /dev/block/loop\$n /dev/loop\$n; do '
+      '  if [ -e "\$d" ] && losetup "\$d" "$img" 2>/dev/null; then '
+      '    if mount -t ext4 -o rw "\$d" \$_mnt 2>/dev/null; then '
+      '      echo "LOOPOK:\$d"; ok=1; break 2; '
+      '    else losetup -d "\$d" 2>/dev/null; err="\$d:mount"; fi; '
+      '  else err="\$d:losetup"; fi; '
+      'done; done; '
+      '[ -z "\$ok" ] && echo "LOSETUP_ERR(最后尝试): \$err"; '
       'echo LOOPDONE');
     onLog(losetup);
     if (losetup.contains('LOOPOK')) {
       final lp = RegExp(r'LOOPOK:(\S+)').firstMatch(losetup)?.group(1) ?? 'loop';
+      _loopDev = lp;
       onLog('✔ losetup 挂载成功($lp)');
       return _mounted();
     }
@@ -185,8 +187,10 @@ class FirmwareSurgeryEngine {
 
   Future<bool> _umount() async {
     onLog('sync + umount ...');
-    final r = await NativeBridge.exec('sync; umount \$_mnt 2>&1 || echo UMNT_FAIL');
+    final detach = (_loopDev == null) ? '' : '; losetup -d "$_loopDev" 2>/dev/null';
+    final r = await NativeBridge.exec('sync; umount \$_mnt 2>&1 || echo UMNT_FAIL$detach');
     final ok = !r.contains('UMNT_FAIL');
+    _loopDev = null;
     onLog(ok ? '✔ 已卸载' : '✖ 卸载失败: $r');
     return ok;
   }
