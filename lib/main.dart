@@ -97,7 +97,7 @@ class _HomePageState extends State<HomePage> {
           const Text('流水线: 拆包 → 手术(ColorOS 关 OPPO 组件/调 props/精简) → 重打包 → system.img'),
           const SizedBox(height: 8),
           Card(
-            color: Colors.black.withValues(alpha: 0.7),
+            color: Colors.black.withOpacity(0.7),
             child: Container(
               height: 320,
               padding: const EdgeInsets.all(8),
