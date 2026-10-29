@@ -183,12 +183,20 @@ build_payload() {
   export CGO_LDFLAGS="--sysroot=$TC/sysroot -L$STAGE/lib -llzma -lm"
   export CGO_LDFLAGS_ALLOW='.*'
   # -linkmode external -extldflags '-static': 必须, 否则 liblzma 不会静态链进去
-  # -tags netgo: 规避 Go1.27 net 包 cgo 与 bionic getnameinfo 类型不匹配
-  go build -trimpath -buildvcs=false -tags netgo \
+  # -tags 'netgo osusergo': net 包纯Go(避bionic getnameinfo) + os/user 纯Go(避passwd结构差异)
+  go build -trimpath -buildvcs=false -tags 'netgo osusergo' \
     -ldflags="-s -w -linkmode external -extldflags '-static'" \
     -o payload-dumper-go .
   cd -
   cp "$WORK/payload/payload-dumper-go" "$OUT/"
+  # ---- 验证: 架构 / 动态依赖 / lzma 符号 ----
+  echo "-- file --"; file "$OUT/payload-dumper-go"
+  echo "-- readelf Machine/Type --"
+  "$TC/bin/llvm-readelf" -h "$OUT/payload-dumper-go" 2>/dev/null | grep -E 'Machine|Type' || true
+  echo "-- NEEDED (静态则空) --"
+  "$TC/bin/llvm-readelf" -d "$OUT/payload-dumper-go" 2>/dev/null | grep NEEDED || echo "(无 NEEDED, 全静态)"
+  echo "-- lzma 符号数 --"
+  "$TC/bin/llvm-nm" "$OUT/payload-dumper-go" 2>/dev/null | grep -c ' T lzma_' || true
 }
 
 build_lz4
