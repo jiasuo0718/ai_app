@@ -247,6 +247,7 @@ build_ext4() {
 
   cp "$PREFIX/x_e2fsprogs/data/data/com.termux/files/usr/bin/resize2fs" "$OUT/resize2fs"
   cp "$PREFIX/x_e2fsprogs/data/data/com.termux/files/usr/bin/e2fsck"    "$OUT/e2fsck"
+  cp "$PREFIX/x_e2fsprogs/data/data/com.termux/files/usr/bin/debugfs"   "$OUT/debugfs"
   cp "$PREFIX/x_libblkid/data/data/com.termux/files/usr/lib/libblkid.so" "$OUT/libblkid.so"
   cp "$PREFIX/x_libuuid/data/data/com.termux/files/usr/lib/libuuid.so"   "$OUT/libuuid.so"
   cp "$PREFIX/x_sem/data/data/com.termux/files/usr/lib/libandroid-posix-semaphore.so" "$OUT/libandroid-posix-semaphore.so"
@@ -260,7 +261,7 @@ build_erofs
 build_ext4
 build_payload
 
-chmod 755 "$OUT"/resize2fs "$OUT"/e2fsck
+chmod 755 "$OUT"/resize2fs "$OUT"/e2fsck "$OUT"/debugfs
 chmod 644 "$OUT"/libblkid.so "$OUT"/libuuid.so "$OUT"/libandroid-posix-semaphore.so
 
 log "=== 产物清单 ==="
@@ -268,4 +269,4 @@ ls -la "$OUT"
 echo ""
 echo "=== 文件类型(确认 arm64) ==="
 file "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
-     "$OUT"/resize2fs "$OUT"/e2fsck "$OUT"/libblkid.so "$OUT"/libuuid.so 2>/dev/null || true
+     "$OUT"/resize2fs "$OUT"/e2fsck "$OUT"/debugfs "$OUT"/libblkid.so "$OUT"/libuuid.so 2>/dev/null || true

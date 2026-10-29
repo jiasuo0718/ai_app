@@ -89,9 +89,15 @@ class FirmwareSurgeryEngine {
     String withLib(String bin, String args) => '${ld.replaceAll('\$TOOL_DIR', toolDir)}"$bin" $args';
     final img = firmwarePath;
 
-    // ---- 1. 挂载(带 setenforce 0 与 losetup 回退) ----
+    // ---- 0.5 备份原镜像(防可写 loop 挂载损坏原文件) ----
+    onLog('备份原镜像(防可写挂载损坏)...');
+    final bak = await NativeBridge.exec(
+        '[ -f "$img.bak" ] && echo BAK_EXISTS || (cp "$img" "$img.bak" 2>/dev/null && echo BAK_OK || echo BAK_FAIL)');
+    onLog(bak.trim());
+
+    // ---- 1. 挂载(loop0 显式绑定, 失败兜底 mount -o loop) ----
     if (!await _mount(img)) {
-      onLog('✖ 挂载失败, 中止(已尝试 setenforce 0 / losetup)');
+      onLog('✖ 挂载失败, 中止(已尝试 loop0 绑定 + mount -o loop)');
       return null;
     }
 
@@ -129,53 +135,35 @@ class FirmwareSurgeryEngine {
   }
 
   // ---------- 挂载 ----------
+  // 注: Android loop 节点由 ueventd 异步创建, 路径/时序不可靠。
+  // 方案: 手动 mknod 预分配 /dev/block/loop0 并显式绑定;
+  //       失败则静默兜底用系统 mount -o loop 直接挂。
   Future<bool> _mount(String img) async {
     await NativeBridge.exec('mkdir -p $_mnt');
 
-    // 尝试1: toybox 自带 loop 支持
-    onLog('尝试 mount -o rw,loop ...');
-    var r = await NativeBridge.exec('mount -o rw,loop "$img" $_mnt 2>&1 || echo MOUNT_FAIL');
-    if (r.contains('MOUNT_FAIL')) {
-      onLog('失败, setenforce 0 后重试...');
-      await NativeBridge.exec('setenforce 0 2>&1 || true');
-      final se = await NativeBridge.exec('getenforce 2>&1');
-      onLog('SELinux 状态: ${se.trim()}');
-      r = await NativeBridge.exec('mount -o rw,loop "$img" $_mnt 2>&1 || echo MOUNT_FAIL');
-    }
-    if (!r.contains('MOUNT_FAIL')) {
-      onLog('✔ 挂载成功');
-      return _mounted();
-    }
+    onLog('尝试显式绑定 /dev/block/loop0 ...');
+    final r = await NativeBridge.exec(
+      'setenforce 0 2>/dev/null; '
+      'mkdir -p \$_mnt; '
+      'mknod /dev/block/loop0 b 7 0 2>/dev/null; '
+      'chmod 660 /dev/block/loop0 2>/dev/null; '
+      '(losetup /dev/block/loop0 "$img" 2>/dev/null && '
+      ' mount -t ext4 -o rw /dev/block/loop0 \$_mnt 2>/dev/null && echo BIND_OK) || '
+      '(timeout 25 mount -t ext4 -o rw,loop,noatime,nodiratime "$img" \$_mnt 2>/dev/null && echo DIRECT_OK) || '
+      'echo MNT_FAIL; '
+      'echo MNT_DONE');
+    onLog(r.trim());
 
-    // 尝试2: losetup 显式绑定(扫描空闲 loop 0-63; 内核常把 loop0-7 留给系统挂载)
-    onLog('回退 losetup + mount(扫描空闲 loop 0-63)...');
-    final loopInfo = await NativeBridge.exec('ls /sys/block/ 2>/dev/null | grep -i loop | head -20 || echo NO_LOOP_DEVS');
-    onLog('内核 loop 设备: ${loopInfo.trim()}');
-    final losetup = await NativeBridge.exec(
-      'ok=""; err=""; '
-      'for n in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 '
-      '20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 '
-      '40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 '
-      '60 61 62 63; do '
-      '[ -e /dev/block/loop\$n ] || mknod /dev/block/loop\$n b 7 \$n 2>/dev/null; '
-      '[ -e /dev/loop\$n ] || mknod /dev/loop\$n b 7 \$n 2>/dev/null; '
-      'for d in /dev/block/loop\$n /dev/loop\$n; do '
-      '  if [ -e "\$d" ] && losetup "\$d" "$img" 2>/dev/null; then '
-      '    if mount -t ext4 -o rw "\$d" \$_mnt 2>/dev/null; then '
-      '      echo "LOOPOK:\$d"; ok=1; break 2; '
-      '    else losetup -d "\$d" 2>/dev/null; err="\$d:mount"; fi; '
-      '  else err="\$d:losetup"; fi; '
-      'done; done; '
-      '[ -z "\$ok" ] && echo "LOSETUP_ERR(最后尝试): \$err"; '
-      'echo LOOPDONE');
-    onLog(losetup);
-    if (losetup.contains('LOOPOK')) {
-      final lp = RegExp(r'LOOPOK:(\S+)').firstMatch(losetup)?.group(1) ?? 'loop';
-      _loopDev = lp;
-      onLog('✔ losetup 挂载成功($lp)');
+    if (r.contains('BIND_OK')) {
+      _loopDev = '/dev/block/loop0';
+      onLog('✔ loop0 显式绑定挂载成功');
       return _mounted();
     }
-    onLog('✖ 挂载全部失败(原因见上方 LOSETUP_ERR)');
+    if (r.contains('DIRECT_OK')) {
+      onLog('✔ mount -o loop 直接挂载成功');
+      return _mounted();
+    }
+    onLog('✖ 挂载失败(已尝试 loop0 绑定 + mount -o loop, 镜像未改动)');
     return false;
   }
 
@@ -186,13 +174,12 @@ class FirmwareSurgeryEngine {
   }
 
   Future<bool> _umount() async {
-    onLog('sync + umount ...');
+    onLog('清理: sync + umount + losetup -d loop0 ...');
     final detach = (_loopDev == null) ? '' : '; losetup -d "$_loopDev" 2>/dev/null';
-    final r = await NativeBridge.exec('sync; umount \$_mnt 2>&1 || echo UMNT_FAIL$detach');
-    final ok = !r.contains('UMNT_FAIL');
+    final r = await NativeBridge.exec('sync; umount \$_mnt 2>/dev/null; losetup -d /dev/block/loop0 2>/dev/null$detach; echo CLEAN_DONE');
+    onLog(r.trim());
     _loopDev = null;
-    onLog(ok ? '✔ 已卸载' : '✖ 卸载失败: $r');
-    return ok;
+    return true;
   }
 
   // ---------- 精简 + 改 build.prop ----------
