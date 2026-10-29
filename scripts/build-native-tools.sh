@@ -238,13 +238,19 @@ build_ext4() {
   export LDFLAGS="-L$STAGE/lib"
   export CPPFLAGS="-I$STAGE/include"
   export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
-  # 绕过外部 uuid 探测(OpenWrt 系常用手段), 强制走内置 lib/uuid
+  # 绕过外部 uuid/blkid 探测(OpenWrt 系常用手段), 强制走内置 lib/uuid + lib/blkid
   export ac_cv_lib_uuid_uuid_generate=yes
   export ac_cv_lib_uuid_uuid_unparse=yes
   export ac_cv_lib_uuid_uuid_clear=yes
   export ac_cv_lib_uuid_uuid_is_null=yes
   export ac_cv_lib_uuid_uuid_compare=yes
   export ac_cv_lib_uuid_uuid_copy=yes
+  export ac_cv_header_uuid_uuid_h=yes
+  export ac_cv_lib_blkid_blkid_get_cache=yes
+  export ac_cv_lib_blkid_blkid_devno_to_devname=yes
+  export ac_cv_lib_blkid_blkid_find_dev_with_tag=yes
+  export ac_cv_lib_blkid_blkid_probe_all=yes
+  export ac_cv_header_blkid_blkid_h=yes
   # blkid/uuidd/nls/tls/共享库 全关, 内置 lib/uuid + lib/blkid
   ./configure --host="$TARGET" --prefix="$STAGE" \
       --disable-libuuid --disable-libblkid --disable-uuidd \
