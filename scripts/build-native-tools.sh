@@ -126,6 +126,26 @@ EOF
   cp "$WORK/erofs/fsck/fsck.erofs" "$OUT/"
 }
 
+# ---- 2.5 liblzma(xz): payload-dumper-go 的 go-xz(cgo) 需要 lzma.h ----
+build_lzma() {
+  [ -f "$STAGE/lib/liblzma.a" ] && { log "liblzma 已存在, 跳过"; return; }
+  log "编译 liblzma(xz) (android/arm64)"
+  rm -rf "$WORK/xz"
+  git clone --depth 1 -q https://github.com/tukaani-project/xz.git "$WORK/xz"
+  cd "$WORK/xz"
+  ./autogen.sh >/dev/null 2>&1 || true
+  CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" \
+  ./configure --host="$TARGET" --prefix="$STAGE" \
+      --disable-shared --enable-static \
+      --disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-doc \
+      > configure.out 2>&1 \
+      || { echo "xz configure failed:"; tail -20 configure.out; exit 1; }
+  make -C src/liblzma -j"$(nproc)" >/dev/null 2>&1
+  make -C src/liblzma install >/dev/null 2>&1
+  cd -
+  echo "liblzma: $(ls -la "$STAGE/lib/liblzma.a" 2>/dev/null | awk '{print $5}') bytes"
+}
+
 # ---- 3. payload-dumper-go ----
 build_payload() {
   [ -f "$OUT/payload-dumper-go" ] && { log "payload-dumper-go 已存在, 跳过"; return; }
@@ -133,16 +153,19 @@ build_payload() {
   rm -rf "$WORK/payload"
   git clone --depth 1 -q https://github.com/ssut/payload-dumper-go.git "$WORK/payload"
   cd "$WORK/payload"
-  # gozstd 是 cgo 包(包装 zstd C), 必须开 CGO + NDK clang 交叉编译
+  # gozstd(cgo 包) + go-xz(cgo 包, 需 liblzma): 开 CGO + NDK clang + stage 里的静态 lzma
   CC="$TC/bin/${TARGET}${API}-clang" \
   CXX="$TC/bin/${TARGET}${API}-clang++" \
   CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+  CGO_CFLAGS="-I$STAGE/include" \
+  CGO_LDFLAGS="-L$STAGE/lib -llzma" \
   go build -ldflags "-s -w" -o payload-dumper-go .
   cd -
   cp "$WORK/payload/payload-dumper-go" "$OUT/"
 }
 
 build_lz4
+build_lzma
 build_erofs
 build_payload
 
