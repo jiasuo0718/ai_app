@@ -114,14 +114,14 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 12),
           _pathField(
             _fwPathCtrl,
-            '固件路径 (选 .img / payload 文件)',
+            '固件路径 (选 .img 文件, 就地瘦身)',
             pickDir: false,
             extensions: const ['.img', '.bin', '.ozip', '.gz', '.zip'],
           ),
           const SizedBox(height: 8),
           _pathField(
             _outDirCtrl,
-            '输出目录',
+            '工作目录(本版就地改镜像, 此框可留空)',
             pickDir: true,
           ),
           const SizedBox(height: 12),
@@ -131,7 +131,7 @@ class _HomePageState extends State<HomePage> {
             label: Text(_running ? '手术中...' : '开始手术'),
           ),
           const SizedBox(height: 16),
-          const Text('流水线: 拆包 → 手术(ColorOS 关 OPPO 组件/调 props/精简) → 重打包 → system.img'),
+          const Text('流水线: 挂载(loop,rw) → 删冗余App+改build.prop → 卸载 → e2fsck → resize2fs -M → truncate'),
           const SizedBox(height: 8),
           Card(
             color: Colors.black.withOpacity(0.7),

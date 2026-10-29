@@ -256,13 +256,18 @@ build_ext4() {
       --disable-libuuid --disable-libblkid --disable-uuidd \
       --disable-e2initrd-helper --disable-defrag --disable-nls --disable-tls \
       --disable-elf-shlibs \
-      > configure.out 2>&1 \
-      || { echo "e2fsprogs configure failed:"; tail -40 configure.out; dump_configure_failure config.log; exit 1; }
-  make -C lib -j"$(nproc)" > lib.make.out 2>&1 || { echo "e2fsprogs lib make failed:"; tail -40 lib.make.out; exit 1; }
-  make -C debugfs -j"$(nproc)" debugfs > debugfs.make.out 2>&1 || { echo "debugfs make failed:"; tail -40 debugfs.make.out; exit 1; }
-  make -C misc -j"$(nproc)" mke2fs > mke2fs.make.out 2>&1 || { echo "mke2fs make failed:"; tail -40 mke2fs.make.out; exit 1; }
-  make -C e2fsck -j"$(nproc)" e2fsck > e2fsck.make.out 2>&1 || { echo "e2fsck make failed:"; tail -40 e2fsck.make.out; exit 1; }
-  make -C resize -j"$(nproc)" resize2fs > resize.make.out 2>&1 || { echo "resize2fs make failed:"; tail -40 resize.make.out; exit 1; }
+      > configure.out 2>&1
+  rc=$?
+  echo "=== e2fsprogs configure rc=$rc ==="
+  if [ $rc -ne 0 ]; then echo "e2fsprogs configure failed:"; tail -40 configure.out; dump_configure_failure config.log; exit 1; fi
+  tail -15 configure.out
+  # 确认关键 Makefile 已生成(configure 漏生 lib/Makefile 是此前卡点)
+  for mf in Makefile lib/Makefile debugfs/Makefile resize/Makefile e2fsck/Makefile misc/Makefile; do
+    [ -f "$mf" ] || { echo "!! 缺 $mf"; }
+  done
+  # 顶层 make: 一次构建全部库与工具, 比 -C lib 更稳
+  make -j"$(nproc)" > make.out 2>&1 || { echo "e2fsprogs make failed:"; tail -50 make.out; exit 1; }
+  echo "e2fsprogs make 完成"
   cd -
   cp "$WORK/e2fsprogs/debugfs/debugfs" "$OUT/"
   cp "$WORK/e2fsprogs/misc/mke2fs" "$OUT/"

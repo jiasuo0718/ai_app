@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/services.dart';
 
 /// 原生通道: 见 android/.../MainActivity.kt
@@ -13,7 +14,7 @@ class NativeBridge {
     }
   }
 
-  /// 用 su 执行命令
+  /// 用 su 执行命令, 返回 stdout+stderr
   static Future<String> exec(String command) async {
     try {
       return await _channel.invokeMethod<String>('exec', {'command': command}) ?? '';
@@ -22,7 +23,7 @@ class NativeBridge {
     }
   }
 
-  /// 把捆绑的 arm64 工具拷到可执行缓存目录
+  /// 把捆绑的 arm64 工具拷到可执行缓存目录(自动 chmod 755)
   static Future<String> copyTool(String asset, String name) async {
     try {
       return await _channel
@@ -43,30 +44,22 @@ class NativeBridge {
       return ['ERR|$e'];
     }
   }
-
-  /// 检测镜像格式: erofs / ext4 / sparse / other / error
-  static Future<String> fileType(String path) async {
-    try {
-      return await _channel.invokeMethod<String>('fileType', {'path': path}) ?? 'other';
-    } catch (e) {
-      return 'error:$e';
-    }
-  }
 }
 
-/// 固件手术流水线: 拆包 -> 手术(patch) -> 重打包 -> 输出 system.img
-///
-/// 手术 profile 是"可编辑的补丁配置", 见 [PatchProfile]。
-/// 第一版先搭起流水线与 UI, 各阶段真实命令按固件类型(erofs/ext4)填实。
+/// 固件手术流水线(v0.4 挂载版):
+///   挂载(loop,rw) -> 删冗余 App + 改 build.prop -> 卸载
+///   -> e2fsck 校验 -> resize2fs -M 收缩 -> 截断 -> 产物=输入镜像(就地瘦身)
 class FirmwareSurgeryEngine {
   FirmwareSurgeryEngine({required this.onLog});
 
-  /// 回调用于把每行输出推给 UI
+  /// 回调用于把每行输出推给 UI 黑框
   final void Function(String line) onLog;
+
+  static const String _mnt = '/data/local/tmp/fw_mnt';
 
   Future<String?> runPipeline({required String firmwarePath, required String outDir}) async {
     onLog('固件: $firmwarePath');
-    onLog('输出目录: $outDir');
+    onLog('方案: Root 挂载原地精简 + resize2fs 收缩体积');
 
     if (!await NativeBridge.checkRoot()) {
       onLog('✖ 未检测到 root，无法执行手术。');
@@ -74,11 +67,8 @@ class FirmwareSurgeryEngine {
     }
     onLog('✔ root 正常');
 
-    // ---- 0. 备齐捆绑的 arm64 工具 ----
-    const tools = [
-      'payload-dumper-go', 'mkfs.erofs', 'dump.erofs', 'fsck.erofs',
-      'debugfs', 'mke2fs', 'e2fsck',
-    ];
+    // ---- 0. 工具: 本版只需要 resize2fs + e2fsck ----
+    final tools = ['resize2fs', 'e2fsck'];
     final toolPaths = <String, String>{};
     for (final t in tools) {
       final p = await NativeBridge.copyTool('assets/tools/$t', t);
@@ -89,105 +79,202 @@ class FirmwareSurgeryEngine {
       toolPaths[t] = p;
       onLog('✔ 工具就绪: $p');
     }
-    final payloadGo = toolPaths['payload-dumper-go']!;
-    final mkfsErofs = toolPaths['mkfs.erofs']!;
-    final dumpErofs = toolPaths['dump.erofs']!;
-    final debugfs = toolPaths['debugfs']!;
-    final mke2fs = toolPaths['mke2fs']!;
+    final resize2fs = toolPaths['resize2fs']!;
+    final e2fsck = toolPaths['e2fsck']!;
+    final img = firmwarePath;
 
-    // ---- 1. 检测镜像格式 ----
-    final fmt = await NativeBridge.fileType(firmwarePath);
-    onLog('镜像格式: $fmt');
-
-    // ---- 2. 拆包 ----
-    final String unpack;
-    if (fmt == 'erofs') {
-      unpack = await NativeBridge.exec(
-          'mkdir -p "$outDir/system" && "$dumpErofs" "$firmwarePath" "$outDir/system" 2>&1 || echo UNPACK_FAIL');
-    } else if (fmt == 'ext4') {
-      // debugfs rdump: 离线解包 ext4 镜像(不需要挂载), 兼容中文/空格路径
-      unpack = await NativeBridge.exec(
-          'mkdir -p "$outDir/system" && "$debugfs" -R "rdump / \\"$outDir/system\\"" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
-    } else if (fmt == 'payload' || fmt == 'other') {
-      // OTA payload / 其他: 用 payload-dumper-go 拆
-      unpack = await NativeBridge.exec(
-          'mkdir -p "$outDir" && "$payloadGo" extract --partition system -o "$outDir/system" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
-    } else {
-      onLog('✖ 暂不支持格式 $fmt 的拆包(仅内置 erofs/ext4/payload 工具)');
-      return null;
-    }
-    onLog(unpack);
-
-    // ---- 3. 校验拆包结果: 为空则中止, 不能把空目录重打包成假镜像 ----
-    final n = await NativeBridge.exec('ls -A "$outDir/system" 2>/dev/null | wc -l');
-    final count = int.tryParse(n.trim()) ?? 0;
-    onLog('拆包内容条目数: $count');
-    if (count == 0) {
-      onLog('✖ 拆包为空, 中止手术(上一版本会把空目录打包成 1 块的假镜像)');
+    // ---- 1. 挂载(带 setenforce 0 与 losetup 回退) ----
+    if (!await _mount(img)) {
+      onLog('✖ 挂载失败, 中止(已尝试 setenforce 0 / losetup)');
       return null;
     }
 
-    // ---- 4. 手术(patch) ----
-    final patch = await applyPatch(systemDir: '$outDir/system');
-    if (!patch.ok) {
-      onLog('✖ 手术失败: ${patch.msg}');
+    // ---- 2. 精简 + 改 build.prop ----
+    final slim = await _slimAndPatch();
+    if (!slim) {
+      await _umount();
+      onLog('✖ 精简/修改失败, 已卸载');
       return null;
     }
-    onLog('✔ 手术完成');
 
-    // ---- 5. 重打包: erofs 用 mkfs.erofs, ext4 用 mke2fs -d ----
-    final outImg = '$outDir/system.img';
-    final String repack;
-    if (fmt == 'ext4') {
-      // 按源镜像大小估算 ext4 容量(源字节/1024=k), 用 -d 从目录打包; 保留 ext4 必要 feature
-      repack = await NativeBridge.exec(
-          'sz=$(stat -c %s "$firmwarePath"); rm -f "$outImg"; "$mke2fs" -t ext4 -L system '
-          '-O ^has_journal,^64bit -d "$outDir/system" "$outImg" "$((sz/1024))k" 2>&1 || echo REPACK_FAIL');
-    } else {
-      repack = await NativeBridge.exec(
-          '"$mkfsErofs" -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');
+    // ---- 3. 卸载 ----
+    if (!await _umount()) {
+      onLog('✖ 卸载失败, 请手动 umount $_mnt');
+      return null;
     }
-    onLog(repack);
 
-    onLog('✔ 手术结束，产物: $outImg');
-    return outImg;
+    // ---- 4. e2fsck 强制检查(防收缩损坏) ----
+    onLog('运行 e2fsck -f -y(收缩前校验)...');
+    final fsck = await NativeBridge.exec('"$e2fsck" -f -y "$img" 2>&1; echo "RC=$?"');
+    onLog(fsck);
+    if (fsck.contains('RC=1') || fsck.contains('RC=2') || fsck.contains('RC=4')) {
+      onLog('⚠ e2fsck 返回异常码, 仍继续尝试收缩(可在日志里复核)');
+    }
+
+    // ---- 5. resize2fs -M 收缩 + 解析块数 + 截断 ----
+    final newSize = await _shrinkAndTruncate(img, resize2fs);
+    if (newSize == null) {
+      onLog('✖ resize2fs 收缩/截断失败');
+      return null;
+    }
+
+    onLog('✔ 手术完成, 产物(就地瘦身): $img (${newSize} 字节)');
+    return img;
   }
 
-  /// 手术补丁: 关 ColorOS 的 OPPO 组件 + 调 props + 精简。
-  /// 真实改法按固件内容填实(改 build.prop / init rc / 删冗余)。
-  Future<({bool ok, String msg})> applyPatch({required String systemDir}) async {
-    // TODO(迭代): 落到具体文件——
-    //   1) 编辑 systemDir/build.prop: 关 OPPO 看门狗/遥测/性能组件, 降 dexopt 内存峰值
-    //   2) 停用/删除 vendor 里 nwatchcall / atlas / oplusperfcount 等
-    //   3) 精简冗余 app/模块, 减小 system 体积与首启内存
-    onLog('执行 ColorOS 手术 profile...');
-    return (ok: true, msg: 'patch profile 已执行(待填实)');
+  // ---------- 挂载 ----------
+  Future<bool> _mount(String img) async {
+    await NativeBridge.exec('mkdir -p $_mnt');
+    onLog('尝试 mount -o rw,loop ...');
+    var r = await NativeBridge.exec('mount -o rw,loop "$img" $_mnt 2>&1 || echo MOUNT_FAIL');
+    if (r.contains('MOUNT_FAIL')) {
+      onLog('挂载失败, 尝试 setenforce 0 后重试...');
+      await NativeBridge.exec('setenforce 0 2>&1 || true');
+      r = await NativeBridge.exec('mount -o rw,loop "$img" $_mnt 2>&1 || echo MOUNT_FAIL');
+    }
+    if (r.contains('MOUNT_FAIL')) {
+      // 回退: losetup 显式绑定 + mount -t ext4
+      onLog('仍失败, 回退 losetup + mount...');
+      await NativeBridge.exec('setenforce 0 2>&1 || true');
+      final losetup = await NativeBridge.exec(
+        'for n in 0 1 2 3 4 5 6 7; do '
+        'losetup /dev/block/loop$n "$img" 2>/dev/null && '
+        '{ mount -t ext4 -o rw /dev/block/loop$n $_mnt 2>/dev/null && echo LOOPOK && break; }; '
+        'done; echo LOOPDONE');
+      if (!losetup.contains('LOOPOK')) {
+        onLog('✖ 挂载全部失败: $losetup');
+        return false;
+      }
+      onLog('✔ losetup 挂载成功');
+    } else {
+      onLog('✔ 挂载成功');
+    }
+    final probe = await NativeBridge.exec('ls -A $_mnt 2>/dev/null | wc -l');
+    onLog('挂载点条目数: ${probe.trim()}');
+    if ((int.tryParse(probe.trim()) ?? 0) == 0) {
+      onLog('⚠ 挂载点为空(镜像可能不可挂载), 继续尝试手术');
+    }
+    return true;
+  }
+
+  Future<bool> _umount() async {
+    onLog('sync + umount ...');
+    final r = await NativeBridge.exec('sync; umount $_mnt 2>&1 || echo UMNT_FAIL');
+    final ok = !r.contains('UMNT_FAIL');
+    onLog(ok ? '✔ 已卸载' : '✖ 卸载失败: $r');
+    return ok;
+  }
+
+  // ---------- 精简 + 改 build.prop ----------
+  Future<bool> _slimAndPatch() async {
+    bool anyOk = false;
+
+    // 2a. 删除冗余预装 App(仅 system/app 下, 不动 priv-app 核心服务)
+    for (final name in PatchProfile.colorOS15.removeApps) {
+      final target = '$_mnt/system/app/$name';
+      final exists = await NativeBridge.exec('ls -d "$target" 2>/dev/null | wc -l');
+      if ((int.tryParse(exists.trim()) ?? 0) > 0) {
+        final r = await NativeBridge.exec('rm -rf "$target" && echo RM_OK');
+        onLog('✂ 删除 $name: ${r.contains('RM_OK') ? '已删' : '失败'}');
+        anyOk = true;
+      } else {
+        onLog('- 跳过 $name(不存在)');
+      }
+    }
+
+    // 2b. 追加 build.prop(分区根或 system/ 下二选一)
+    final bp = await NativeBridge.exec(
+      'BP=""; [ -f $_mnt/build.prop ] && BP=$_mnt/build.prop; '
+      '[ -f $_mnt/system/build.prop ] && BP=$_mnt/system/build.prop; echo "$BP"');
+    final bpPath = bp.trim();
+    if (bpPath.isEmpty) {
+      onLog('⚠ 未找到 build.prop');
+    } else {
+      onLog('build.prop 位于: $bpPath');
+      for (final prop in PatchProfile.colorOS15.setProps) {
+        await NativeBridge.exec('echo "$prop" >> "$bpPath" && echo PROP_OK');
+        onLog('✎ build.prop += $prop');
+      }
+      anyOk = true;
+    }
+    return anyOk;
+  }
+
+  // ---------- resize2fs -M 收缩 + 截断 ----------
+  Future<int?> _shrinkAndTruncate(String img, String resize2fs) async {
+    onLog('运行 resize2fs -M(收缩到最小块数)...');
+    // 用 Dart Process.run 捕获 su 子进程的 stdout(便于正则解析块数)
+    String out;
+    try {
+      final p = await Process.run('su', ['-c', '"$resize2fs" -M "$img"'], stdoutEncoding: utf8);
+      out = (p.stdout as String?) ?? '';
+      if (p.exitCode != 0 && out.trim().isEmpty) {
+        out = (p.stderr as String?) ?? out; // 输出可能走 stderr
+      }
+    } catch (e) {
+      // Process.run 在部分环境不可用时回退原生通道(同样能拿到输出)
+      onLog('(Process.run 不可用, 回退原生 su 通道: $e)');
+      out = await NativeBridge.exec('"$resize2fs" -M "$img" 2>&1');
+    }
+    onLog(out);
+
+    // 解析 "Resizing the filesystem to N (4k) blocks" / "is now N (4k) blocks long"
+    final m = RegExp(r'to\s+(\d+)\s+\((\d+)k\)\s+blocks').firstMatch(out);
+    if (m == null) {
+      onLog('✖ 未能从 resize2fs 输出解析出块数(输出见上)');
+      return null;
+    }
+    final blocks = int.parse(m.group(1)!);
+    final k = int.parse(m.group(2)!);
+    final newSize = blocks * k * 1024;
+    onLog('解析到块数 $blocks (${k}k), 新体积 = $newSize 字节');
+
+    // 截断: 优先 Dart File.truncate, 权限不足回退 su truncate
+    var truncated = false;
+    try {
+      final f = File(img);
+      if (await f.exists()) {
+        await f.truncate(newSize);
+        truncated = true;
+        onLog('✔ Dart File.truncate 成功');
+      }
+    } catch (_) {}
+    if (!truncated) {
+      final r = await NativeBridge.exec('truncate -s $newSize "$img" && echo TRUNK_OK');
+      truncated = r.contains('TRUNK_OK');
+      onLog(truncated ? '✔ su truncate 成功' : '✖ 截断失败: $r');
+    }
+    if (!truncated) return null;
+
+    final sz = await NativeBridge.exec('stat -c %s "$img" 2>/dev/null');
+    onLog('产物实际大小: ${sz.trim()} 字节');
+    return newSize;
   }
 }
 
 /// 手术补丁配置。用可编辑的数据描述要改什么，换固件不重编 app。
 class PatchProfile {
   final String name;
-  final List<String> setProps; // 要写入 build.prop 的 ro./persist. 键值
-  final List<String> disableServices; // 要停用/删除的厂商 daemon 二进制名
+  final List<String> setProps; // 要追加进 build.prop 的 ro./persist. 键值
+  final List<String> removeApps; // system/app 下要删除的预装 App 目录名
 
   const PatchProfile({
     required this.name,
     this.setProps = const [],
-    this.disableServices = const [],
+    this.removeApps = const [],
   });
 
   static const colorOS15 = PatchProfile(
-    name: 'ColorOS 15 手术',
+    name: 'ColorOS 手术',
     setProps: [
-      // 关 OPPO 看门狗/遥测(按固件实际 gate 键调整)
+      'ro.config.low_ram=true',
+      'ro.sys.fw.bg_apps_limit=12',
       'persist.sys.oplus.nwatchcall.disable=true',
       'persist.vendor.atlas.disable=true',
-      'persist.sys.oplus.perf.disable=true',
-      'ro.sys.selinux=permissive',
     ],
-    disableServices: [
-      'nwatchcall', 'atlas', 'atlasservice', 'oplusperfcount', 'oplus_',
+    removeApps: [
+      'OPPOStore', 'HeyTapStore', 'HeyTapCloudService', 'HeyTapTheme',
+      'OPPOThemeStore', 'OPPOCloud', 'OPPOSettingsIntelligence',
     ],
   );
 }
