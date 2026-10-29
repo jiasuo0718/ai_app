@@ -236,8 +236,8 @@ build_libuuid() {
       --disable-all-programs --enable-libuuid \
       > configure.out 2>&1 \
       || { echo "libuuid configure failed:"; tail -40 configure.out; exit 1; }
-  make -C libuuid -j"$(nproc)" >/dev/null 2>&1
-  make -C libuuid install >/dev/null 2>&1
+  make -C libuuid -j"$(nproc)" > libuuid.make.out 2>&1 || { echo "libuuid make failed:"; tail -40 libuuid.make.out; exit 1; }
+  make -C libuuid install > libuuid.install.out 2>&1 || { echo "libuuid install failed:"; tail -40 libuuid.install.out; exit 1; }
   cd -
   [ -f "$STAGE/lib/libuuid.a" ] || { echo "!! libuuid.a missing"; exit 1; }
   [ -f "$STAGE/include/uuid/uuid.h" ] || { echo "!! uuid.h missing"; exit 1; }
