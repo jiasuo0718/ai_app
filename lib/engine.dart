@@ -75,7 +75,10 @@ class FirmwareSurgeryEngine {
     onLog('✔ root 正常');
 
     // ---- 0. 备齐捆绑的 arm64 工具 ----
-    const tools = ['payload-dumper-go', 'mkfs.erofs', 'dump.erofs', 'fsck.erofs'];
+    const tools = [
+      'payload-dumper-go', 'mkfs.erofs', 'dump.erofs', 'fsck.erofs',
+      'debugfs', 'mke2fs', 'e2fsck',
+    ];
     final toolPaths = <String, String>{};
     for (final t in tools) {
       final p = await NativeBridge.copyTool('assets/tools/$t', t);
@@ -89,6 +92,8 @@ class FirmwareSurgeryEngine {
     final payloadGo = toolPaths['payload-dumper-go']!;
     final mkfsErofs = toolPaths['mkfs.erofs']!;
     final dumpErofs = toolPaths['dump.erofs']!;
+    final debugfs = toolPaths['debugfs']!;
+    final mke2fs = toolPaths['mke2fs']!;
 
     // ---- 1. 检测镜像格式 ----
     final fmt = await NativeBridge.fileType(firmwarePath);
@@ -99,12 +104,16 @@ class FirmwareSurgeryEngine {
     if (fmt == 'erofs') {
       unpack = await NativeBridge.exec(
           'mkdir -p "$outDir/system" && "$dumpErofs" "$firmwarePath" "$outDir/system" 2>&1 || echo UNPACK_FAIL');
+    } else if (fmt == 'ext4') {
+      // debugfs rdump: 离线解包 ext4 镜像(不需要挂载), 兼容中文/空格路径
+      unpack = await NativeBridge.exec(
+          'mkdir -p "$outDir/system" && "$debugfs" -R "rdump / \\"$outDir/system\\"" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
     } else if (fmt == 'payload' || fmt == 'other') {
       // OTA payload / 其他: 用 payload-dumper-go 拆
       unpack = await NativeBridge.exec(
           'mkdir -p "$outDir" && "$payloadGo" extract --partition system -o "$outDir/system" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
     } else {
-      onLog('✖ 暂不支持格式 $fmt 的拆包(仅内置 erofs/payload 工具)');
+      onLog('✖ 暂不支持格式 $fmt 的拆包(仅内置 erofs/ext4/payload 工具)');
       return null;
     }
     onLog(unpack);
@@ -126,10 +135,18 @@ class FirmwareSurgeryEngine {
     }
     onLog('✔ 手术完成');
 
-    // ---- 5. 重打包(erofs) ----
+    // ---- 5. 重打包: erofs 用 mkfs.erofs, ext4 用 mke2fs -d ----
     final outImg = '$outDir/system.img';
-    final repack = await NativeBridge.exec(
-        '"$mkfsErofs" -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');
+    final String repack;
+    if (fmt == 'ext4') {
+      // 按源镜像大小估算 ext4 容量(源字节/1024=k), 用 -d 从目录打包; 保留 ext4 必要 feature
+      repack = await NativeBridge.exec(
+          'sz=$(stat -c %s "$firmwarePath"); rm -f "$outImg"; "$mke2fs" -t ext4 -L system '
+          '-O ^has_journal,^64bit -d "$outDir/system" "$outImg" "$((sz/1024))k" 2>&1 || echo REPACK_FAIL');
+    } else {
+      repack = await NativeBridge.exec(
+          '"$mkfsErofs" -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');
+    }
     onLog(repack);
 
     onLog('✔ 手术结束，产物: $outImg');

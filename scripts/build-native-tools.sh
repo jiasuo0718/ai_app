@@ -221,16 +221,48 @@ build_payload() {
   "$TC/bin/llvm-nm" "$OUT/payload-dumper-go" 2>/dev/null | grep -c ' T lzma_' || true
 }
 
+# ---- 4. e2fsprogs: ext4 解包(debugfs) / 重打包(mke2fs) / 校验(e2fsck) ----
+build_ext4() {
+  [ -f "$OUT/debugfs" ] && { log "e2fsprogs 已存在, 跳过"; return; }
+  log "编译 e2fsprogs (android/arm64) -> debugfs/mke2fs/e2fsck"
+  rm -rf "$WORK/e2fsprogs"
+  git clone --depth 1 -q -b v1.47.1 https://github.com/tytso/e2fsprogs.git "$WORK/e2fsprogs"
+  cd "$WORK/e2fsprogs"
+  export CC="$TC/bin/${TARGET}${API}-clang"
+  export AR="$TC/bin/llvm-ar"
+  export RANLIB="$TC/bin/llvm-ranlib"
+  export CFLAGS="-O2 -fPIC -Wl,--allow-multiple-definition"
+  export LDFLAGS="-L$STAGE/lib"
+  ./configure --host="$TARGET" --prefix="$STAGE" \
+      --disable-libblkid --disable-libuuid --disable-uuidd --disable-fsck \
+      --disable-e2initrd-helper --disable-defrag --disable-nls --disable-tls \
+      --disable-elf-shlibs \
+      > configure.out 2>&1 \
+      || { echo "e2fsprogs configure failed:"; tail -40 configure.out; dump_configure_failure config.log; exit 1; }
+  make -C lib -j"$(nproc)" >/dev/null 2>&1
+  make -C debugfs -j"$(nproc)" debugfs >/dev/null 2>&1
+  make -C misc -j"$(nproc)" mke2fs >/dev/null 2>&1
+  make -C e2fsck -j"$(nproc)" e2fsck >/dev/null 2>&1
+  cd -
+  cp "$WORK/e2fsprogs/debugfs/debugfs" "$OUT/"
+  cp "$WORK/e2fsprogs/misc/mke2fs" "$OUT/"
+  cp "$WORK/e2fsprogs/e2fsck/e2fsck" "$OUT/"
+  echo "e2fsprogs 工具就绪"
+}
+
 build_lz4
 build_lzma
 build_qsortr
 build_erofs
+build_ext4
 build_payload
 
-chmod 755 "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go
+chmod 755 "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
+  "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck
 
 log "=== 产物清单 ==="
 ls -la "$OUT"
 echo ""
 echo "=== 文件类型(确认 arm64) ==="
-file "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go 2>/dev/null || true
+file "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
+     "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck 2>/dev/null || true
