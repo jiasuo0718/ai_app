@@ -130,35 +130,56 @@ class FirmwareSurgeryEngine {
   // ---------- 挂载 ----------
   Future<bool> _mount(String img) async {
     await NativeBridge.exec('mkdir -p $_mnt');
+
+    // 尝试1: toybox 自带 loop 支持
     onLog('尝试 mount -o rw,loop ...');
     var r = await NativeBridge.exec('mount -o rw,loop "$img" $_mnt 2>&1 || echo MOUNT_FAIL');
     if (r.contains('MOUNT_FAIL')) {
-      onLog('挂载失败, 尝试 setenforce 0 后重试...');
+      onLog('失败, setenforce 0 后重试...');
       await NativeBridge.exec('setenforce 0 2>&1 || true');
+      final se = await NativeBridge.exec('getenforce 2>&1');
+      onLog('SELinux 状态: ${se.trim()}');
       r = await NativeBridge.exec('mount -o rw,loop "$img" $_mnt 2>&1 || echo MOUNT_FAIL');
     }
-    if (r.contains('MOUNT_FAIL')) {
-      // 回退: losetup 显式绑定 + mount -t ext4
-      onLog('仍失败, 回退 losetup + mount...');
-      await NativeBridge.exec('setenforce 0 2>&1 || true');
-      final losetup = await NativeBridge.exec(
-        'for n in 0 1 2 3 4 5 6 7; do '
-        'losetup /dev/block/loop\$n "$img" 2>/dev/null && '
-        '{ mount -t ext4 -o rw /dev/block/loop\$n \$_mnt 2>/dev/null && echo LOOPOK && break; }; '
-        'done; echo LOOPDONE');
-      if (!losetup.contains('LOOPOK')) {
-        onLog('✖ 挂载全部失败: $losetup');
-        return false;
-      }
-      onLog('✔ losetup 挂载成功');
-    } else {
+    if (!r.contains('MOUNT_FAIL')) {
       onLog('✔ 挂载成功');
+      return _mounted();
     }
+
+    // 尝试2: losetup 显式绑定(自动补 loop 节点, 兼容 /dev/block/loopN 与 /dev/loopN)
+    onLog('回退 losetup + mount(自动补 loop 节点)...');
+    final loopInfo = await NativeBridge.exec('ls /sys/block/ 2>/dev/null | grep -i loop || echo NO_LOOP_DEVS');
+    onLog('内核 loop 设备: ${loopInfo.trim()}');
+    final losetup = await NativeBridge.exec(
+      'ok=""; '
+      'for n in 0 1 2 3 4 5 6 7; do '
+      '[ -e /dev/block/loop\$n ] || mknod /dev/block/loop\$n b 7 \$n 2>/dev/null; '
+      '[ -e /dev/loop\$n ] || mknod /dev/loop\$n b 7 \$n 2>/dev/null; '
+      'if losetup /dev/block/loop\$n "$img" 2>/dev/null; then '
+      'if mount -t ext4 -o rw /dev/block/loop\$n \$_mnt 2>/dev/null; then '
+      'echo "LOOPOK:/dev/block/loop\$n"; ok=1; break; '
+      'else losetup -d /dev/block/loop\$n 2>/dev/null; fi; fi; '
+      'if [ -e /dev/loop\$n ] && losetup /dev/loop\$n "$img" 2>/dev/null; then '
+      'if mount -t ext4 -o rw /dev/loop\$n \$_mnt 2>/dev/null; then '
+      'echo "LOOPOK:/dev/loop\$n"; ok=1; break; '
+      'else losetup -d /dev/loop\$n 2>/dev/null; fi; fi; '
+      'done; '
+      '[ -z "\$ok" ] && { echo "LOSETUP_ERR:"; losetup /dev/block/loop0 "$img" 2>&1 | head -3; '
+      'mount -t ext4 -o rw /dev/block/loop0 \$_mnt 2>&1 | head -3; }; '
+      'echo LOOPDONE');
+    onLog(losetup);
+    if (losetup.contains('LOOPOK')) {
+      final lp = RegExp(r'LOOPOK:(\S+)').firstMatch(losetup)?.group(1) ?? 'loop';
+      onLog('✔ losetup 挂载成功($lp)');
+      return _mounted();
+    }
+    onLog('✖ 挂载全部失败(原因见上方 LOSETUP_ERR)');
+    return false;
+  }
+
+  Future<bool> _mounted() async {
     final probe = await NativeBridge.exec('ls -A \$_mnt 2>/dev/null | wc -l');
     onLog('挂载点条目数: ${probe.trim()}');
-    if ((int.tryParse(probe.trim()) ?? 0) == 0) {
-      onLog('⚠ 挂载点为空(镜像可能不可挂载), 继续尝试手术');
-    }
     return true;
   }
 
