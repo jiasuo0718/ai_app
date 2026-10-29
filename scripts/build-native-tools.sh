@@ -5,42 +5,51 @@ set -euo pipefail
 
 NDK="${1:?用法: build-native-tools.sh <android-ndk路径>}"
 TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-CLANG="$TC/bin/aarch64-linux-android24-clang"
-AR="$TC/bin/llvm-ar"
+TARGET=aarch64-linux-android
+API=24
 
 OUT="assets/tools"
-WORK=".build-tools"
+# 关键: 绝对路径(configure 在子目录跑, 相对 -L 会解析错)
+WORK="$PWD/.build-tools"
 STAGE="$WORK/stage"
 mkdir -p "$OUT" "$WORK" "$STAGE"
 
 log() { echo -e "\n### $1 ###"; }
 
-# ---- 1. lz4 静态库 (供 erofs 链接) ----
+# ---- configure 失败诊断 ----
+dump_configure_failure() {
+  local log="${1:-config.log}"
+  [ -f "$log" ] || { echo "!! $log not found"; return; }
+  echo "================ config.log: C compiler sanity check ================"
+  awk '/checking whether the C compiler works/ {flag=1} flag {print} /checking whether we are cross compiling/ {if(flag){exit}}' "$log" | head -120
+  echo "================ config.log: conftest.c blocks (link tests) ================"
+  grep -n -B2 -A25 'conftest\.c' "$log" | head -300
+  echo "================ config.log: real errors ================"
+  grep -n -iE '(error:|undefined reference|cannot find|No such file|not found|fatal error|cannot open)' "$log" | head -80
+  echo "================ config.log: tail 120 ================"
+  tail -n 120 "$log"
+  local cmd
+  cmd=$(grep -m1 -E '^configure:[0-9]+: .*clang' "$log" | sed 's/^configure:[0-9]*: //' || true)
+  if [ -n "$cmd" ]; then
+    echo "================ replay first CC check ================"
+    echo "+ $cmd"
+    ( cd "$(dirname "$log")" && eval "$cmd" ) || echo "!! replay exit=$?"
+  fi
+}
+
+# ---- 1. lz4 静态库 ----
 build_lz4() {
   [ -f "$STAGE/lib/liblz4.a" ] && { log "lz4 已存在, 跳过"; return; }
   log "编译 lz4 (android/arm64)"
   rm -rf "$WORK/lz4"
   git clone --depth 1 -q https://github.com/lz4/lz4.git "$WORK/lz4"
-  make -C "$WORK/lz4/lib" CC="$CLANG" AR="$AR" liblz4.a -j"$(nproc)"
-  mkdir -p "$STAGE/lib/pkgconfig" "$STAGE/include"
-  cp "$WORK/lz4/lib/liblz4.a" "$STAGE/lib/"
-  cp "$WORK/lz4/lib/lz4.h" "$WORK/lz4/lib/lz4frame.h" "$WORK/lz4/lib/lz4hc.h" "$STAGE/include/" 2>/dev/null || true
-  # 手写 pkg-config(只指向静态库, 避免 .so 干扰链接)
-  cat > "$STAGE/lib/pkgconfig/liblz4.pc" <<'EOF'
-prefix=__STAGE__
-libdir=${prefix}/lib
-includedir=${prefix}/include
-Name: lz4
-Description: LZ4 compression library
-Version: 1.9
-Libs: -L${libdir} -llz4
-Cflags: -I${includedir}
-EOF
-  sed -i "s|__STAGE__|$STAGE|" "$STAGE/lib/pkgconfig/liblz4.pc"
-  echo "lz4 静态库就绪: $(ls -la "$STAGE/lib/liblz4.a" | awk '{print $5}') bytes"
+  make -C "$WORK/lz4/lib" CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" liblz4.a -j"$(nproc)"
+  make -C "$WORK/lz4/lib" CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" PREFIX="$STAGE" install
+  rm -f "$STAGE"/lib/liblz4.so*   # 双保险: 只留静态, 避免 .so 干扰链接
+  echo "lz4 静态库: $(ls -la "$STAGE/lib/liblz4.a" | awk '{print $5}') bytes"
 }
 
-# ---- 2. erofs-utils: mkfs.erofs / dump.erofs / fsck.erofs ----
+# ---- 2. erofs-utils ----
 build_erofs() {
   [ -f "$OUT/mkfs.erofs" ] && { log "erofs 已存在, 跳过"; return; }
   log "编译 erofs-utils (android/arm64)"
@@ -48,14 +57,33 @@ build_erofs() {
   git clone --depth 1 -q -b dev https://github.com/erofs/erofs-utils.git "$WORK/erofs"
   cd "$WORK/erofs"
   ./autogen.sh
-  PKG_CONFIG_PATH="$STAGE/lib/pkgconfig" \
-  CC="$CLANG" AR="$AR" \
-  CFLAGS="-fPIC -fPIE" \
-  CPPFLAGS="-I$STAGE/include" \
-  LDFLAGS="-pie -L$STAGE/lib" \
-  LIBS="-llz4" \
-  ./configure --host=aarch64-linux-android --disable-lzma \
-    || { echo "===== CONFIG.LOG: 编译器自检段 ====="; grep -A25 -B5 "checking whether the C compiler works" config.log 2>/dev/null; echo "===== CONFIG.LOG: error/undefined 行 ====="; grep -nB2 -A12 -iE "error:|undefined reference|cannot find|No such file" config.log 2>/dev/null | head -80; exit 1; }
+
+  export CC="$TC/bin/${TARGET}${API}-clang"
+  export CXX="$TC/bin/${TARGET}${API}-clang++"
+  export AR="$TC/bin/llvm-ar"
+  export LD="$TC/bin/ld.lld"
+  export RANLIB="$TC/bin/llvm-ranlib"
+  export STRIP="$TC/bin/llvm-strip"
+  export CFLAGS="-O2 -fPIC -Wl,--allow-multiple-definition"
+  export CXXFLAGS="-O2 -fPIC -Wl,--allow-multiple-definition"
+  export LDFLAGS="-Wl,--allow-multiple-definition -L$STAGE/lib"
+  export CPPFLAGS="-I$STAGE/include"
+  export LZ4_CFLAGS="-I$STAGE/include"
+  export LZ4_LIBS="-L$STAGE/lib -llz4"
+  export PKG_CONFIG_PATH="$STAGE/lib/pkgconfig"
+
+  if ! ./configure \
+       --host="$TARGET" \
+       --prefix="$STAGE" \
+       --enable-static --disable-shared \
+       --without-selinux --without-uuid \
+       LZ4_CFLAGS="$LZ4_CFLAGS" LZ4_LIBS="$LZ4_LIBS" \
+       > configure.out 2>&1; then
+    echo "!! configure failed"; tail -n 60 configure.out
+    dump_configure_failure config.log
+    exit 1
+  fi
+
   make -j"$(nproc)"
   cd -
   cp "$WORK/erofs/mkfs/mkfs.erofs" "$OUT/"
@@ -63,7 +91,7 @@ build_erofs() {
   cp "$WORK/erofs/fsck/fsck.erofs" "$OUT/"
 }
 
-# ---- 3. payload-dumper-go (OZIP/payload.bin 拆包) ----
+# ---- 3. payload-dumper-go ----
 build_payload() {
   [ -f "$OUT/payload-dumper-go" ] && { log "payload-dumper-go 已存在, 跳过"; return; }
   log "编译 payload-dumper-go (android/arm64)"
