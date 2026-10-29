@@ -226,11 +226,11 @@ build_libuuid() {
   [ -f "$STAGE/lib/libuuid.a" ] && { log "libuuid 已存在, 跳过"; return; }
   log "编译 libuuid (util-linux) (android/arm64)"
   rm -rf "$WORK/util-linux" "$WORK/util-linux.tar.gz"
-  curl -fsSL -o "$WORK/util-linux.tar.gz" "https://github.com/util-linux/util-linux/archive/refs/tags/v2.39.3.tar.gz"
+  # 用 kernel.org 官方 release 包(自带 configure, github 源码包没有 configure)
+  curl -fsSL -o "$WORK/util-linux.tar.gz" "https://cdn.kernel.org/pub/linux/utils/util-linux/v2.39/util-linux-2.39.3.tar.gz"
   tar xf "$WORK/util-linux.tar.gz" -C "$WORK"
   mv "$WORK/util-linux-2.39.3" "$WORK/util-linux"
   cd "$WORK/util-linux"
-  ./autogen.sh >/dev/null 2>&1 || true
   CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" \
   ./configure --host="$TARGET" --prefix="$STAGE" \
       --disable-all-programs --enable-libuuid \
