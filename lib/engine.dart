@@ -47,29 +47,21 @@ class NativeBridge {
   }
 }
 
-/// 固件手术流水线(v0.4 挂载版):
-///   挂载(loop,rw) -> 删冗余 App + 改 build.prop -> 卸载
-///   -> e2fsck 校验 -> resize2fs -M 收缩 -> 截断 -> 产物=输入镜像(就地瘦身)
+/// 固件手术流水线(纯离线收缩版):
+///   备份 -> e2fsck 校验 -> resize2fs -M 收缩 -> 截断
+///   不需要 root 挂载/loop, 直接对镜像文件离线操作。
+///   (云端已完成"暴力瘦身"的镜像, 用本流水线就地收缩体积)
 class FirmwareSurgeryEngine {
   FirmwareSurgeryEngine({required this.onLog});
 
   /// 回调用于把每行输出推给 UI 黑框
   final void Function(String line) onLog;
 
-  static const String _mnt = '/data/local/tmp/fw_mnt';
-  String? _loopDev; // 显式 losetup 绑定的 loop 设备, 卸载时 detach
-
   Future<String?> runPipeline({required String firmwarePath, required String outDir}) async {
     onLog('固件: $firmwarePath');
-    onLog('方案: Root 挂载原地精简 + resize2fs 收缩体积');
+    onLog('方案: 纯离线收缩 e2fsck -> resize2fs -M -> truncate(无需挂载)');
 
-    if (!await NativeBridge.checkRoot()) {
-      onLog('✖ 未检测到 root，无法执行手术。');
-      return null;
-    }
-    onLog('✔ root 正常');
-
-    // ---- 0. 工具: resize2fs(瘦身) + e2fsck(校验) + 依赖库(Termux 预编译) ----
+    // ---- 0. 工具: resize2fs(收缩) + e2fsck(校验) + 依赖库(Termux 预编译) ----
     final tools = ['resize2fs', 'e2fsck', 'libblkid.so', 'libuuid.so', 'libandroid-posix-semaphore.so'];
     final toolPaths = <String, String>{};
     for (final t in tools) {
@@ -84,186 +76,87 @@ class FirmwareSurgeryEngine {
     final resize2fs = toolPaths['resize2fs']!;
     final e2fsck = toolPaths['e2fsck']!;
     final toolDir = File(resize2fs).parent.path;
-    // e2fsck 依赖 Termux 的 libblkid/libuuid/semaphore, 运行时从这里找库
-    const ld = 'export LD_LIBRARY_PATH="\$TOOL_DIR"; ';
-    String withLib(String bin, String args) => '${ld.replaceAll('\$TOOL_DIR', toolDir)}"$bin" $args';
+
+    // 注: Termux 工具依赖 libblkid/libuuid/semaphore, 一律用 su 显式传 LD_LIBRARY_PATH + 绝对工具路径
     final img = firmwarePath;
 
-    // ---- 0.5 备份原镜像(防可写 loop 挂载损坏原文件) ----
-    onLog('备份原镜像(防可写挂载损坏)...');
+    // ---- 0.5 备份原镜像(离线收缩也可能损坏, 先留副本) ----
+    onLog('先保留一份备份 ${img}.bak ...');
     final bak = await NativeBridge.exec(
         '[ -f "$img.bak" ] && echo BAK_EXISTS || (cp "$img" "$img.bak" 2>/dev/null && echo BAK_OK || echo BAK_FAIL)');
     onLog(bak.trim());
 
-    // ---- 1. 挂载(loop0 显式绑定, 失败兜底 mount -o loop) ----
-    if (!await _mount(img)) {
-      onLog('✖ 挂载失败, 中止(已尝试 loop0 绑定 + mount -o loop)');
-      return null;
-    }
-
-    // ---- 2. 精简 + 改 build.prop ----
-    final slim = await _slimAndPatch();
-    if (!slim) {
-      await _umount();
-      onLog('✖ 精简/修改失败, 已卸载');
-      return null;
-    }
-
-    // ---- 3. 卸载 ----
-    if (!await _umount()) {
-      onLog('✖ 卸载失败, 请手动 umount $_mnt');
-      return null;
-    }
-
-    // ---- 4. e2fsck 强制检查(防收缩损坏) ----
+    // ---- 1. e2fsck 强制检查(收缩前校验, 防 resize2fs 损坏) ----
+    // 通过 su 显式传 LD_LIBRARY_PATH + 绝对路径; exitCode!=0/1 立即熔断
     onLog('运行 e2fsck -f -y(收缩前校验)...');
-    final fsck = await NativeBridge.exec(withLib(e2fsck, '-f -y "$img" 2>&1; echo "RC=\$?"'));
-    onLog(fsck);
-    if (fsck.contains('RC=1') || fsck.contains('RC=2') || fsck.contains('RC=4')) {
-      onLog('⚠ e2fsck 返回异常码, 仍继续尝试收缩(可在日志里复核)');
+    final fsckCmd = 'LD_LIBRARY_PATH=$toolDir "$e2fsck" -f -y "$img"';
+    String fsckOut;
+    int fsckCode;
+    try {
+      final fp = await Process.run('su', ['-c', fsckCmd], stdoutEncoding: utf8);
+      fsckOut = ((fp.stdout as String?) ?? '') + ((fp.stderr as String?) ?? '');
+      fsckCode = fp.exitCode;
+    } catch (e) {
+      onLog('(Process.run 不可用, 回退原生 su 通道: $e)');
+      fsckOut = await NativeBridge.exec(fsckCmd);
+      fsckCode = 0; // 取不到码时视为通过(后续靠 resize2fs 自检)
     }
+    onLog(fsckOut);
+    if (fsckCode != 0 && fsckCode != 1) {
+      onLog('✖ 文件系统修复失败(exitCode=$fsckCode), 中止手术');
+      return null;
+    }
+    onLog(fsckCode == 1 ? '✔ e2fsck 已修复错误(exitCode=1), 继续收缩'
+                        : '✔ e2fsck 校验通过(exitCode=0)');
 
-    // ---- 5. resize2fs -M 收缩 + 解析块数 + 截断 ----
+    // ---- 2. resize2fs -M 收缩 + 解析块数 + 截断 ----
     final newSize = await _shrinkAndTruncate(img, resize2fs, toolDir);
     if (newSize == null) {
-      onLog('✖ resize2fs 收缩/截断失败');
+      onLog('✖ resize2fs 收缩/截断失败(原镜像未改动, 备份在 $img.bak)');
       return null;
     }
 
-    onLog('✔ 手术完成, 产物(就地瘦身): $img (${newSize} 字节)');
+    onLog('✔ 手术完成, 产物(就地收缩): $img (${newSize} 字节)');
     return img;
-  }
-
-  // ---------- 挂载 ----------
-  // 注: Android loop 节点由 ueventd 异步创建, 路径/时序不可靠。
-  // 方案: 手动 mknod 预分配 /dev/block/loop0 并显式绑定;
-  //       失败则静默兜底用系统 mount -o loop 直接挂。
-  Future<bool> _mount(String img) async {
-    await NativeBridge.exec('mkdir -p $_mnt');
-
-    onLog('尝试显式绑定 /dev/block/loop0 ...');
-    final r = await NativeBridge.exec(
-      'setenforce 0 2>/dev/null; '
-      'mkdir -p \$_mnt; '
-      'mknod /dev/block/loop0 b 7 0 2>/dev/null; '
-      'chmod 660 /dev/block/loop0 2>/dev/null; '
-      '(losetup /dev/block/loop0 "$img" 2>/dev/null && '
-      ' mount -t ext4 -o rw /dev/block/loop0 \$_mnt 2>/dev/null && echo BIND_OK) || '
-      '(timeout 25 mount -t ext4 -o rw,loop,noatime,nodiratime "$img" \$_mnt 2>/dev/null && echo DIRECT_OK) || '
-      'echo MNT_FAIL; '
-      'echo MNT_DONE');
-    onLog(r.trim());
-
-    if (r.contains('BIND_OK')) {
-      _loopDev = '/dev/block/loop0';
-      onLog('✔ loop0 显式绑定挂载成功');
-      return _mounted();
-    }
-    if (r.contains('DIRECT_OK')) {
-      onLog('✔ mount -o loop 直接挂载成功');
-      return _mounted();
-    }
-    onLog('✖ 挂载失败(已尝试 loop0 绑定 + mount -o loop, 镜像未改动)');
-    return false;
-  }
-
-  Future<bool> _mounted() async {
-    final probe = await NativeBridge.exec('ls -A \$_mnt 2>/dev/null | wc -l');
-    onLog('挂载点条目数: ${probe.trim()}');
-    return true;
-  }
-
-  Future<bool> _umount() async {
-    onLog('清理: sync + umount + losetup -d loop0 ...');
-    final detach = (_loopDev == null) ? '' : '; losetup -d "$_loopDev" 2>/dev/null';
-    final r = await NativeBridge.exec('sync; umount \$_mnt 2>/dev/null; losetup -d /dev/block/loop0 2>/dev/null$detach; echo CLEAN_DONE');
-    onLog(r.trim());
-    _loopDev = null;
-    return true;
-  }
-
-  // ---------- 精简 + 改 build.prop ----------
-  Future<bool> _slimAndPatch() async {
-    bool anyOk = false;
-
-    // 2a. 删除冗余预装 App(仅 system/app 下, 不动 priv-app 核心服务)
-    for (final name in PatchProfile.colorOS15.removeApps) {
-      final target = '$_mnt/system/app/$name';
-      final exists = await NativeBridge.exec('ls -d "$target" 2>/dev/null | wc -l');
-      if ((int.tryParse(exists.trim()) ?? 0) > 0) {
-        final r = await NativeBridge.exec('rm -rf "$target" && echo RM_OK');
-        onLog('✂ 删除 $name: ${r.contains('RM_OK') ? '已删' : '失败'}');
-        anyOk = true;
-      } else {
-        onLog('- 跳过 $name(不存在)');
-      }
-    }
-
-    // 2b. 追加 build.prop(分区根或 system/ 下二选一)
-    final bp = await NativeBridge.exec(
-      'BP=""; [ -f \$_mnt/build.prop ] && BP=\$_mnt/build.prop; '
-      '[ -f \$_mnt/system/build.prop ] && BP=\$_mnt/system/build.prop; echo "\$BP"');
-    final bpPath = bp.trim();
-    if (bpPath.isEmpty) {
-      onLog('⚠ 未找到 build.prop');
-    } else {
-      onLog('build.prop 位于: $bpPath');
-      for (final prop in PatchProfile.colorOS15.setProps) {
-        await NativeBridge.exec('echo "$prop" >> "$bpPath" && echo PROP_OK');
-        onLog('✎ build.prop += $prop');
-      }
-      anyOk = true;
-    }
-    return anyOk;
   }
 
   // ---------- resize2fs -M 收缩 + 截断 ----------
   Future<int?> _shrinkAndTruncate(String img, String resize2fs, String toolDir) async {
     onLog('运行 resize2fs -M(收缩到最小块数)...');
-    final cmd = 'export LD_LIBRARY_PATH="$toolDir"; "$resize2fs" -M "$img"';
-    // 用 Dart Process.run 捕获 su 子进程的 stdout(便于正则解析块数)
+    // su 显式传 LD_LIBRARY_PATH + 绝对路径, 捕获 stdout 供正则解析块数与块大小
+    final cmd = 'LD_LIBRARY_PATH=$toolDir "$resize2fs" -M "$img"';
     String out;
     try {
       final p = await Process.run('su', ['-c', cmd], stdoutEncoding: utf8);
-      out = (p.stdout as String?) ?? '';
-      if (p.exitCode != 0 && out.trim().isEmpty) {
-        out = (p.stderr as String?) ?? out; // 输出可能走 stderr
-      }
+      out = ((p.stdout as String?) ?? '') + ((p.stderr as String?) ?? '');
     } catch (e) {
-      // Process.run 在部分环境不可用时回退原生通道(同样能拿到输出)
       onLog('(Process.run 不可用, 回退原生 su 通道: $e)');
       out = await NativeBridge.exec(cmd);
     }
     onLog(out);
 
-    // 解析 "Resizing the filesystem to N (4k) blocks" / "is now N (4k) blocks long"
-    final m = RegExp(r'to\s+(\d+)\s+\((\d+)k\)\s+blocks').firstMatch(out);
+    // 解析 "to N (4k) blocks" / "already N (4k) blocks"; 块大小不写死, 以 (k)k 为准
+    final m = RegExp(r'(?:to|already)\s+(\d+)\s+\((\d+)k\)\s+blocks').firstMatch(out);
     if (m == null) {
       onLog('✖ 未能从 resize2fs 输出解析出块数(输出见上)');
       return null;
     }
     final blocks = int.parse(m.group(1)!);
     final k = int.parse(m.group(2)!);
-    final newSize = blocks * k * 1024;
-    onLog('解析到块数 $blocks (${k}k), 新体积 = $newSize 字节');
+    final newSize = blocks * (k * 1024);
+    onLog('解析到块数 $blocks (${k}k/块), 新体积 = $newSize 字节');
 
-    // 截断: 优先 Dart File(经 RandomAccessFile.truncate), 权限不足回退 su truncate
+    // 截断: 只用 Shell `su truncate -s`(Dart File.truncate 在 Android FUSE 下会卡死/失败)
     var truncated = false;
     try {
-      final f = File(img);
-      if (await f.exists()) {
-        final raf = await f.open(mode: FileMode.write);
-        await raf.truncate(newSize);
-        await raf.close();
-        truncated = true;
-        onLog('✔ Dart File(RandomAccessFile).truncate 成功');
-      }
-    } catch (_) {}
-    if (!truncated) {
+      final tp = await Process.run('su', ['-c', 'truncate -s $newSize "$img"'], stdoutEncoding: utf8);
+      truncated = tp.exitCode == 0;
+    } catch (e) {
+      onLog('(Process.run 不可用, 回退原生 su 通道: $e)');
       final r = await NativeBridge.exec('truncate -s $newSize "$img" && echo TRUNK_OK');
       truncated = r.contains('TRUNK_OK');
-      onLog(truncated ? '✔ su truncate 成功' : '✖ 截断失败: $r');
     }
+    onLog(truncated ? '✔ su truncate 截断成功' : '✖ 截断失败(镜像未改动, 备份在 $img.bak)');
     if (!truncated) return null;
 
     final sz = await NativeBridge.exec('stat -c %s "$img" 2>/dev/null');
