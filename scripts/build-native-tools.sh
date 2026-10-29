@@ -35,10 +35,12 @@ build_erofs() {
   ./autogen.sh
   PKG_CONFIG_PATH="$STAGE/lib/pkgconfig" \
   CC="$CLANG" AR="$AR" \
+  CFLAGS="-fPIC -fPIE" \
   CPPFLAGS="-I$STAGE/include" \
-  LDFLAGS="-L$STAGE/lib" \
+  LDFLAGS="-pie -L$STAGE/lib" \
   LIBS="-llz4" \
-  ./configure --host=aarch64-linux-android --disable-lzma --disable-zstd
+  ./configure --host=aarch64-linux-android --disable-lzma \
+    || { echo "===== CONFIG.LOG (尾部) ====="; tail -60 config.log; exit 1; }
   make -j"$(nproc)"
   cd -
   cp "$WORK/erofs/mkfs/mkfs.erofs" "$OUT/"
