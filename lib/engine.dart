@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 
@@ -83,7 +84,7 @@ class FirmwareSurgeryEngine {
     final e2fsck = toolPaths['e2fsck']!;
     final toolDir = File(resize2fs).parent.path;
     // e2fsck 依赖 Termux 的 libblkid/libuuid/semaphore, 运行时从这里找库
-    const ld = 'export LD_LIBRARY_PATH="$TOOL_DIR"; ';
+    const ld = 'export LD_LIBRARY_PATH="\$TOOL_DIR"; ';
     String withLib(String bin, String args) => '${ld.replaceAll('\$TOOL_DIR', toolDir)}"$bin" $args';
     final img = firmwarePath;
 
@@ -142,8 +143,8 @@ class FirmwareSurgeryEngine {
       await NativeBridge.exec('setenforce 0 2>&1 || true');
       final losetup = await NativeBridge.exec(
         'for n in 0 1 2 3 4 5 6 7; do '
-        'losetup /dev/block/loop$n "$img" 2>/dev/null && '
-        '{ mount -t ext4 -o rw /dev/block/loop$n $_mnt 2>/dev/null && echo LOOPOK && break; }; '
+        'losetup /dev/block/loop\$n "$img" 2>/dev/null && '
+        '{ mount -t ext4 -o rw /dev/block/loop\$n \$_mnt 2>/dev/null && echo LOOPOK && break; }; '
         'done; echo LOOPDONE');
       if (!losetup.contains('LOOPOK')) {
         onLog('✖ 挂载全部失败: $losetup');
@@ -153,7 +154,7 @@ class FirmwareSurgeryEngine {
     } else {
       onLog('✔ 挂载成功');
     }
-    final probe = await NativeBridge.exec('ls -A $_mnt 2>/dev/null | wc -l');
+    final probe = await NativeBridge.exec('ls -A \$_mnt 2>/dev/null | wc -l');
     onLog('挂载点条目数: ${probe.trim()}');
     if ((int.tryParse(probe.trim()) ?? 0) == 0) {
       onLog('⚠ 挂载点为空(镜像可能不可挂载), 继续尝试手术');
@@ -163,7 +164,7 @@ class FirmwareSurgeryEngine {
 
   Future<bool> _umount() async {
     onLog('sync + umount ...');
-    final r = await NativeBridge.exec('sync; umount $_mnt 2>&1 || echo UMNT_FAIL');
+    final r = await NativeBridge.exec('sync; umount \$_mnt 2>&1 || echo UMNT_FAIL');
     final ok = !r.contains('UMNT_FAIL');
     onLog(ok ? '✔ 已卸载' : '✖ 卸载失败: $r');
     return ok;
@@ -188,8 +189,8 @@ class FirmwareSurgeryEngine {
 
     // 2b. 追加 build.prop(分区根或 system/ 下二选一)
     final bp = await NativeBridge.exec(
-      'BP=""; [ -f $_mnt/build.prop ] && BP=$_mnt/build.prop; '
-      '[ -f $_mnt/system/build.prop ] && BP=$_mnt/system/build.prop; echo "$BP"');
+      'BP=""; [ -f \$_mnt/build.prop ] && BP=\$_mnt/build.prop; '
+      '[ -f \$_mnt/system/build.prop ] && BP=\$_mnt/system/build.prop; echo "\$BP"');
     final bpPath = bp.trim();
     if (bpPath.isEmpty) {
       onLog('⚠ 未找到 build.prop');
