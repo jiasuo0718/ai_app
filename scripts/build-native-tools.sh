@@ -96,7 +96,14 @@ EOF
   export CPPFLAGS="-I$STAGE/include"
   export LZ4_CFLAGS="-I$STAGE/include"
   export LZ4_LIBS="-L$STAGE/lib -llz4"
-  export PKG_CONFIG_PATH="$STAGE/lib/pkgconfig"
+  # PKG_CONFIG_LIBDIR: 只搜我们的 stage, 隐藏宿主机 libxml2/zstd 等避免交叉污染
+  export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
+
+  # 若支持 --without-libxml2 / --disable-libxml2 就关掉(erofs 核心不需要它)
+  if ./configure --help 2>/dev/null | grep -qiE 'with-libxml2|disable-libxml2'; then
+    EXTRA_CONF+=('--without-libxml2')
+    echo ">> 检测到 libxml2 选项, 追加 --without-libxml2"
+  fi
 
   if ! ./configure \
        --host="$TARGET" \
