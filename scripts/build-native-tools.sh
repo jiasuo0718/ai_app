@@ -180,12 +180,12 @@ build_payload() {
   export GOARCH=arm64
   unset GOARM
   export CGO_CFLAGS="--sysroot=$TC/sysroot -I$STAGE/include -O2 -fPIC"
-  export CGO_LDFLAGS="--sysroot=$TC/sysroot -L$STAGE/lib -llzma -lm"
+  export CGO_LDFLAGS="--sysroot=$TC/sysroot -L$STAGE/lib -llog -lm"
   export CGO_LDFLAGS_ALLOW='.*'
-  # -linkmode external -extldflags '-static': 必须, 否则 liblzma 不会静态链进去
-  # -tags 'netgo osusergo': net 包纯Go(避bionic getnameinfo) + os/user 纯Go(避passwd结构差异)
+  # -linkmode external: 必须, 否则 liblzma 不会链进去
+  # bionic 无静态 libc, 不能全 -static; 只把 liblzma 静态(-Bstatic), libc/liblog/libm 走动态
   go build -trimpath -buildvcs=false -tags 'netgo osusergo' \
-    -ldflags="-s -w -linkmode external -extldflags '-static'" \
+    -ldflags="-s -w -linkmode external -extldflags '-Wl,-Bstatic -llzma -Wl,-Bdynamic'" \
     -o payload-dumper-go .
   cd -
   cp "$WORK/payload/payload-dumper-go" "$OUT/"
