@@ -58,6 +58,14 @@ build_erofs() {
   cd "$WORK/erofs"
   ./autogen.sh
 
+  # Android 把 pthread 并入 libc, 无独立 libpthread —— 建空桩库满足 -lpthread 检查
+  if [ ! -f "$STAGE/lib/libpthread.a" ]; then
+    printf 'int _pthread_stub;\n' > "$WORK/pthread_stub.c"
+    "$TC/bin/${TARGET}${API}-clang" -c "$WORK/pthread_stub.c" -o "$WORK/pthread_stub.o"
+    "$TC/bin/llvm-ar" crs "$STAGE/lib/libpthread.a" "$WORK/pthread_stub.o"
+    echo "已创建 libpthread 空桩: $STAGE/lib/libpthread.a"
+  fi
+
   export CC="$TC/bin/${TARGET}${API}-clang"
   export CXX="$TC/bin/${TARGET}${API}-clang++"
   export AR="$TC/bin/llvm-ar"
