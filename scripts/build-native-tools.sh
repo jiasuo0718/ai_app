@@ -221,6 +221,29 @@ build_payload() {
   "$TC/bin/llvm-nm" "$OUT/payload-dumper-go" 2>/dev/null | grep -c ' T lzma_' || true
 }
 
+# ---- 3.5 libuuid(util-linux): e2fsprogs 默认要外部 uuid 库 ----
+build_libuuid() {
+  [ -f "$STAGE/lib/libuuid.a" ] && { log "libuuid 已存在, 跳过"; return; }
+  log "编译 libuuid (util-linux) (android/arm64)"
+  rm -rf "$WORK/util-linux" "$WORK/util-linux.tar.gz"
+  curl -fsSL -o "$WORK/util-linux.tar.gz" "https://github.com/util-linux/util-linux/archive/refs/tags/v2.39.3.tar.gz"
+  tar xf "$WORK/util-linux.tar.gz" -C "$WORK"
+  mv "$WORK/util-linux-2.39.3" "$WORK/util-linux"
+  cd "$WORK/util-linux"
+  ./autogen.sh >/dev/null 2>&1 || true
+  CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" \
+  ./configure --host="$TARGET" --prefix="$STAGE" \
+      --disable-all-programs --enable-libuuid \
+      > configure.out 2>&1 \
+      || { echo "libuuid configure failed:"; tail -40 configure.out; exit 1; }
+  make -C libuuid -j"$(nproc)" >/dev/null 2>&1
+  make -C libuuid install >/dev/null 2>&1
+  cd -
+  [ -f "$STAGE/lib/libuuid.a" ] || { echo "!! libuuid.a missing"; exit 1; }
+  [ -f "$STAGE/include/uuid/uuid.h" ] || { echo "!! uuid.h missing"; exit 1; }
+  echo "libuuid: $STAGE/lib/libuuid.a"
+}
+
 # ---- 4. e2fsprogs: ext4 解包(debugfs) / 重打包(mke2fs) / 校验(e2fsck) ----
 build_ext4() {
   [ -f "$OUT/debugfs" ] && { log "e2fsprogs 已存在, 跳过"; return; }
@@ -233,8 +256,11 @@ build_ext4() {
   export RANLIB="$TC/bin/llvm-ranlib"
   export CFLAGS="-O2 -fPIC -Wl,--allow-multiple-definition"
   export LDFLAGS="-L$STAGE/lib"
+  export CPPFLAGS="-I$STAGE/include"
+  export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
+  # 用外部 libuuid; blkid/uuidd/nls/tls/共享库 都关掉
   ./configure --host="$TARGET" --prefix="$STAGE" \
-      --disable-libblkid --disable-libuuid --disable-uuidd --disable-fsck \
+      --enable-libuuid --disable-libblkid --disable-uuidd \
       --disable-e2initrd-helper --disable-defrag --disable-nls --disable-tls \
       --disable-elf-shlibs \
       > configure.out 2>&1 \
@@ -253,6 +279,7 @@ build_ext4() {
 build_lz4
 build_lzma
 build_qsortr
+build_libuuid
 build_erofs
 build_ext4
 build_payload
