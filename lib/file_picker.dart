@@ -28,6 +28,9 @@ class FilePickerPage extends StatefulWidget {
     this.extensions = const [],
   });
 
+  @override
+  State<FilePickerPage> createState() => _FilePickerPageState();
+
   /// 弹出选择器, 返回选中的路径(取消返回 null)
   static Future<String?> pick(BuildContext context,
       {String initialPath = '/storage/emulated/0',
