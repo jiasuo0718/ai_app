@@ -221,33 +221,13 @@ build_payload() {
   "$TC/bin/llvm-nm" "$OUT/payload-dumper-go" 2>/dev/null | grep -c ' T lzma_' || true
 }
 
-# ---- 3.5 libuuid(util-linux): e2fsprogs 默认要外部 uuid 库 ----
-build_libuuid() {
-  [ -f "$STAGE/lib/libuuid.a" ] && { log "libuuid 已存在, 跳过"; return; }
-  log "编译 libuuid (util-linux) (android/arm64)"
-  rm -rf "$WORK/util-linux" "$WORK/util-linux.tar.gz"
-  # 用 kernel.org 官方 release 包(自带 configure, github 源码包没有 configure)
-  curl -fsSL -o "$WORK/util-linux.tar.gz" "https://cdn.kernel.org/pub/linux/utils/util-linux/v2.39/util-linux-2.39.3.tar.gz"
-  tar xf "$WORK/util-linux.tar.gz" -C "$WORK"
-  mv "$WORK/util-linux-2.39.3" "$WORK/util-linux"
-  cd "$WORK/util-linux"
-  CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" \
-  ./configure --host="$TARGET" --prefix="$STAGE" \
-      --disable-all-programs --enable-libuuid \
-      > configure.out 2>&1 \
-      || { echo "libuuid configure failed:"; tail -40 configure.out; exit 1; }
-  make -C libuuid -j"$(nproc)" > libuuid.make.out 2>&1 || { echo "libuuid make failed:"; tail -40 libuuid.make.out; exit 1; }
-  make -C libuuid install > libuuid.install.out 2>&1 || { echo "libuuid install failed:"; tail -40 libuuid.install.out; exit 1; }
-  cd -
-  [ -f "$STAGE/lib/libuuid.a" ] || { echo "!! libuuid.a missing"; exit 1; }
-  [ -f "$STAGE/include/uuid/uuid.h" ] || { echo "!! uuid.h missing"; exit 1; }
-  echo "libuuid: $STAGE/lib/libuuid.a"
-}
-
-# ---- 4. e2fsprogs: ext4 解包(debugfs) / 重打包(mke2fs) / 校验(e2fsck) ----
+# ---- 4. e2fsprogs: ext4 离线工具链(内置 libuuid) ----
+# debugfs(检查) / mke2fs(重打包备用) / e2fsck(校验) / resize2fs(瘦身收缩, 主线)
+# 关键: 用 ac_cv_lib_uuid_* 缓存变量绕过 configure 对外部 uuid 的错误探测,
+#       让 e2fsprogs 走它自己 src 树里的 lib/uuid 内置实现(--disable-libuuid)。
 build_ext4() {
-  [ -f "$OUT/debugfs" ] && { log "e2fsprogs 已存在, 跳过"; return; }
-  log "编译 e2fsprogs (android/arm64) -> debugfs/mke2fs/e2fsck"
+  [ -f "$OUT/resize2fs" ] && { log "e2fsprogs 已存在, 跳过"; return; }
+  log "编译 e2fsprogs (android/arm64) -> debugfs/mke2fs/e2fsck/resize2fs"
   rm -rf "$WORK/e2fsprogs"
   git clone --depth 1 -q -b v1.47.1 https://github.com/tytso/e2fsprogs.git "$WORK/e2fsprogs"
   cd "$WORK/e2fsprogs"
@@ -258,38 +238,46 @@ build_ext4() {
   export LDFLAGS="-L$STAGE/lib"
   export CPPFLAGS="-I$STAGE/include"
   export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
-  # 用外部 libuuid; blkid/uuidd/nls/tls/共享库 都关掉
+  # 绕过外部 uuid 探测(OpenWrt 系常用手段), 强制走内置 lib/uuid
+  export ac_cv_lib_uuid_uuid_generate=yes
+  export ac_cv_lib_uuid_uuid_unparse=yes
+  export ac_cv_lib_uuid_uuid_clear=yes
+  export ac_cv_lib_uuid_uuid_is_null=yes
+  export ac_cv_lib_uuid_uuid_compare=yes
+  export ac_cv_lib_uuid_uuid_copy=yes
+  # blkid/uuidd/nls/tls/共享库 全关, 内置 lib/uuid + lib/blkid
   ./configure --host="$TARGET" --prefix="$STAGE" \
-      --enable-libuuid --disable-libblkid --disable-uuidd \
+      --disable-libuuid --disable-libblkid --disable-uuidd \
       --disable-e2initrd-helper --disable-defrag --disable-nls --disable-tls \
       --disable-elf-shlibs \
       > configure.out 2>&1 \
       || { echo "e2fsprogs configure failed:"; tail -40 configure.out; dump_configure_failure config.log; exit 1; }
-  make -C lib -j"$(nproc)" >/dev/null 2>&1
-  make -C debugfs -j"$(nproc)" debugfs >/dev/null 2>&1
-  make -C misc -j"$(nproc)" mke2fs >/dev/null 2>&1
-  make -C e2fsck -j"$(nproc)" e2fsck >/dev/null 2>&1
+  make -C lib -j"$(nproc)" > lib.make.out 2>&1 || { echo "e2fsprogs lib make failed:"; tail -40 lib.make.out; exit 1; }
+  make -C debugfs -j"$(nproc)" debugfs > debugfs.make.out 2>&1 || { echo "debugfs make failed:"; tail -40 debugfs.make.out; exit 1; }
+  make -C misc -j"$(nproc)" mke2fs > mke2fs.make.out 2>&1 || { echo "mke2fs make failed:"; tail -40 mke2fs.make.out; exit 1; }
+  make -C e2fsck -j"$(nproc)" e2fsck > e2fsck.make.out 2>&1 || { echo "e2fsck make failed:"; tail -40 e2fsck.make.out; exit 1; }
+  make -C resize -j"$(nproc)" resize2fs > resize.make.out 2>&1 || { echo "resize2fs make failed:"; tail -40 resize.make.out; exit 1; }
   cd -
   cp "$WORK/e2fsprogs/debugfs/debugfs" "$OUT/"
   cp "$WORK/e2fsprogs/misc/mke2fs" "$OUT/"
   cp "$WORK/e2fsprogs/e2fsck/e2fsck" "$OUT/"
+  cp "$WORK/e2fsprogs/resize/resize2fs" "$OUT/"
   echo "e2fsprogs 工具就绪"
 }
 
 build_lz4
 build_lzma
 build_qsortr
-build_libuuid
 build_erofs
 build_ext4
 build_payload
 
 chmod 755 "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
-  "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck
+  "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck "$OUT"/resize2fs
 
 log "=== 产物清单 ==="
 ls -la "$OUT"
 echo ""
 echo "=== 文件类型(确认 arm64) ==="
 file "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
-     "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck 2>/dev/null || true
+     "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck "$OUT"/resize2fs 2>/dev/null || true
