@@ -183,7 +183,8 @@ build_payload() {
   export CGO_LDFLAGS="--sysroot=$TC/sysroot -L$STAGE/lib -llzma -lm"
   export CGO_LDFLAGS_ALLOW='.*'
   # -linkmode external -extldflags '-static': 必须, 否则 liblzma 不会静态链进去
-  go build -trimpath -buildvcs=false \
+  # -tags netgo: 规避 Go1.27 net 包 cgo 与 bionic getnameinfo 类型不匹配
+  go build -trimpath -buildvcs=false -tags netgo \
     -ldflags="-s -w -linkmode external -extldflags '-static'" \
     -o payload-dumper-go .
   cd -
