@@ -62,7 +62,11 @@ class MainActivity : FlutterActivity() {
         return runCatching {
             val dir = File(cacheDir, "tools").apply { mkdirs() }
             val f = File(dir, name)
-            assets.open(asset).use { input -> f.outputStream().use { output -> input.copyTo(output) } }
+            // Flutter 资产放在 APK 的 assets/flutter_assets/ 下, AssetManager 相对 assets/ 解析,
+            // 因此必须加 flutter_assets/ 前缀, 否则 assets.open() 找不到(错误消息=asset路径)
+            val realAsset = if (asset.startsWith("flutter_assets/")) asset else "flutter_assets/$asset"
+            assets.open(realAsset).use { input -> f.outputStream().use { output -> input.copyTo(output) } }
+            if (!f.exists() || f.length() == 0L) return@runCatching "ERR: 拷贝后文件为空 $name"
             Runtime.getRuntime().exec(arrayOf("su", "-c", "chmod 755 \"${f.absolutePath}\"")).waitFor()
             f.absolutePath
         }.getOrElse { "ERR: ${it.message}" }
