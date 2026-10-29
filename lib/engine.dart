@@ -43,6 +43,15 @@ class NativeBridge {
       return ['ERR|$e'];
     }
   }
+
+  /// 检测镜像格式: erofs / ext4 / sparse / other / error
+  static Future<String> fileType(String path) async {
+    try {
+      return await _channel.invokeMethod<String>('fileType', {'path': path}) ?? 'other';
+    } catch (e) {
+      return 'error:$e';
+    }
+  }
 }
 
 /// 固件手术流水线: 拆包 -> 手术(patch) -> 重打包 -> 输出 system.img
@@ -81,19 +90,35 @@ class FirmwareSurgeryEngine {
     final mkfsErofs = toolPaths['mkfs.erofs']!;
     final dumpErofs = toolPaths['dump.erofs']!;
 
-    // ---- 1. 拆包: 原始 erofs 镜像(.img)用 dump.erofs, OZIP/payload 用 payload-dumper-go ----
-    final isRawImg = firmwarePath.endsWith('.img') || firmwarePath.contains('system');
+    // ---- 1. 检测镜像格式 ----
+    final fmt = await NativeBridge.fileType(firmwarePath);
+    onLog('镜像格式: $fmt');
+
+    // ---- 2. 拆包 ----
     final String unpack;
-    if (isRawImg) {
+    if (fmt == 'erofs') {
       unpack = await NativeBridge.exec(
           'mkdir -p "$outDir/system" && "$dumpErofs" "$firmwarePath" "$outDir/system" 2>&1 || echo UNPACK_FAIL');
-    } else {
+    } else if (fmt == 'payload' || fmt == 'other') {
+      // OTA payload / 其他: 用 payload-dumper-go 拆
       unpack = await NativeBridge.exec(
           'mkdir -p "$outDir" && "$payloadGo" extract --partition system -o "$outDir/system" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
+    } else {
+      onLog('✖ 暂不支持格式 $fmt 的拆包(仅内置 erofs/payload 工具)');
+      return null;
     }
     onLog(unpack);
 
-    // ---- 2. 手术(patch) ----
+    // ---- 3. 校验拆包结果: 为空则中止, 不能把空目录重打包成假镜像 ----
+    final n = await NativeBridge.exec('ls -A "$outDir/system" 2>/dev/null | wc -l');
+    final count = int.tryParse(n.trim()) ?? 0;
+    onLog('拆包内容条目数: $count');
+    if (count == 0) {
+      onLog('✖ 拆包为空, 中止手术(上一版本会把空目录打包成 1 块的假镜像)');
+      return null;
+    }
+
+    // ---- 4. 手术(patch) ----
     final patch = await applyPatch(systemDir: '$outDir/system');
     if (!patch.ok) {
       onLog('✖ 手术失败: ${patch.msg}');
@@ -101,7 +126,7 @@ class FirmwareSurgeryEngine {
     }
     onLog('✔ 手术完成');
 
-    // ---- 3. 重打包(erofs) ----
+    // ---- 5. 重打包(erofs) ----
     final outImg = '$outDir/system.img';
     final repack = await NativeBridge.exec(
         '"$mkfsErofs" -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');

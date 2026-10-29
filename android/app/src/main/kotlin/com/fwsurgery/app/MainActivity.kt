@@ -34,6 +34,10 @@ class MainActivity : FlutterActivity() {
                     val path = call.argument<String>("path") ?: "/storage/emulated/0"
                     result.success(listDir(path))
                 }
+                "fileType" -> {
+                    val path = call.argument<String>("path") ?: ""
+                    result.success(fileType(path))
+                }
                 else -> result.notImplemented()
             }
         }
@@ -49,6 +53,25 @@ class MainActivity : FlutterActivity() {
             Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
                 .inputStream.bufferedReader().readText().trim()
         }.getOrDefault("").let { it.contains("uid=0") || it.contains("gid=0") }
+    }
+
+    /** 用 su 检测镜像格式: erofs / ext4 / sparse / other:<hex> / error:<msg> */
+    private fun fileType(path: String): String {
+        return runCatching {
+            fun suHex(cmd: String): String {
+                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                return p.inputStream.bufferedReader().readText().trim()
+            }
+            val h4 = suHex("dd if=\"$path\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'")
+            val h2 = suHex("dd if=\"$path\" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \\n'")
+            when {
+                h4.startsWith("3aff26ed") -> "sparse"
+                h4.startsWith("e0ff") -> "erofs"
+                h2.contains("53ef") -> "ext4"
+                h4.isEmpty() -> "error:read-empty"
+                else -> "other:$h4/$h2"
+            }
+        }.getOrElse { "error:${it.message}" }
     }
 
     /** 用 su 列目录: 每行 "D|<完整路径>"(目录) 或 "F|<完整路径>"(文件), 兼容中文/空格路径。 */
