@@ -126,24 +126,44 @@ EOF
   cp "$WORK/erofs/fsck/fsck.erofs" "$OUT/"
 }
 
-# ---- 2.5 liblzma(xz): payload-dumper-go 的 go-xz(cgo) 需要 lzma.h ----
+# ---- 2.5 liblzma(xz-5.4.6): payload 的 go-xz(cgo) 需要 ----
 build_lzma() {
   [ -f "$STAGE/lib/liblzma.a" ] && { log "liblzma 已存在, 跳过"; return; }
-  log "编译 liblzma(xz) (android/arm64)"
-  rm -rf "$WORK/xz"
-  git clone --depth 1 -q https://github.com/tukaani-project/xz.git "$WORK/xz"
+  log "编译 liblzma(xz-5.4.6) (android/arm64)"
+  rm -rf "$WORK/xz" "$WORK/xz.tar.gz"
+  curl -fsSL -o "$WORK/xz.tar.gz" https://tukaani.org/xz/xz-5.4.6.tar.gz
+  tar xf "$WORK/xz.tar.gz" -C "$WORK"
+  mv "$WORK/xz-5.4.6" "$WORK/xz"
   cd "$WORK/xz"
-  ./autogen.sh >/dev/null 2>&1 || true
   CC="$TC/bin/${TARGET}${API}-clang" AR="$TC/bin/llvm-ar" \
   ./configure --host="$TARGET" --prefix="$STAGE" \
-      --disable-shared --enable-static \
-      --disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-doc \
+      --enable-static --disable-shared \
+      --disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo \
+      --disable-lzma-links --disable-scripts --disable-doc \
+      --disable-nls --disable-threads \
+      --disable-symbol-versions --disable-ifunc \
       > configure.out 2>&1 \
       || { echo "xz configure failed:"; tail -20 configure.out; exit 1; }
-  make -C src/liblzma -j"$(nproc)" >/dev/null 2>&1
-  make -C src/liblzma install >/dev/null 2>&1
+  make -j"$(nproc)" >/dev/null 2>&1
+  make install >/dev/null 2>&1
+  rm -f "$STAGE"/lib/liblzma.so*
+  [ -f "$STAGE/lib/liblzma.a" ] || { echo "!! liblzma.a missing"; exit 1; }
+  [ -f "$STAGE/include/lzma.h" ] || { echo "!! lzma.h missing"; exit 1; }
+  # 重写 .pc 避免宿主机路径
+  mkdir -p "$STAGE/lib/pkgconfig"
+  cat > "$STAGE/lib/pkgconfig/liblzma.pc" <<EOF
+prefix=$STAGE
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+Name: liblzma
+Description: XZ compression library
+Version: 5.4.6
+Libs: -L\${libdir} -llzma
+Cflags: -I\${includedir}
+EOF
   cd -
-  echo "liblzma: $(ls -la "$STAGE/lib/liblzma.a" 2>/dev/null | awk '{print $5}') bytes"
+  echo "liblzma: $(ls -la "$STAGE/lib/liblzma.a" | awk '{print $5}') bytes, 头文件 OK"
 }
 
 # ---- 3. payload-dumper-go ----
@@ -153,13 +173,19 @@ build_payload() {
   rm -rf "$WORK/payload"
   git clone --depth 1 -q https://github.com/ssut/payload-dumper-go.git "$WORK/payload"
   cd "$WORK/payload"
-  # gozstd(cgo 包) + go-xz(cgo 包, 需 liblzma): 开 CGO + NDK clang + stage 里的静态 lzma
-  CC="$TC/bin/${TARGET}${API}-clang" \
-  CXX="$TC/bin/${TARGET}${API}-clang++" \
-  CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
-  CGO_CFLAGS="-I$STAGE/include" \
-  CGO_LDFLAGS="-L$STAGE/lib -llzma" \
-  go build -ldflags "-s -w" -o payload-dumper-go .
+  export CGO_ENABLED=1
+  export CC="$TC/bin/${TARGET}${API}-clang"
+  export CXX="$TC/bin/${TARGET}${API}-clang++"
+  export GOOS=linux          # Android 用户态就是 linux, 不是 android
+  export GOARCH=arm64
+  unset GOARM
+  export CGO_CFLAGS="--sysroot=$TC/sysroot -I$STAGE/include -O2 -fPIC"
+  export CGO_LDFLAGS="--sysroot=$TC/sysroot -L$STAGE/lib -llzma -lm"
+  export CGO_LDFLAGS_ALLOW='.*'
+  # -linkmode external -extldflags '-static': 必须, 否则 liblzma 不会静态链进去
+  go build -trimpath -buildvcs=false \
+    -ldflags="-s -w -linkmode external -extldflags '-static'" \
+    -o payload-dumper-go .
   cd -
   cp "$WORK/payload/payload-dumper-go" "$OUT/"
 }
