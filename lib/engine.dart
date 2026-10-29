@@ -67,8 +67,8 @@ class FirmwareSurgeryEngine {
     }
     onLog('✔ root 正常');
 
-    // ---- 0. 工具: 本版只需要 resize2fs + e2fsck ----
-    final tools = ['resize2fs', 'e2fsck'];
+    // ---- 0. 工具: resize2fs(瘦身) + e2fsck(校验) + 依赖库(Termux 预编译) ----
+    final tools = ['resize2fs', 'e2fsck', 'libblkid.so', 'libuuid.so', 'libandroid-posix-semaphore.so'];
     final toolPaths = <String, String>{};
     for (final t in tools) {
       final p = await NativeBridge.copyTool('assets/tools/$t', t);
@@ -81,6 +81,10 @@ class FirmwareSurgeryEngine {
     }
     final resize2fs = toolPaths['resize2fs']!;
     final e2fsck = toolPaths['e2fsck']!;
+    final toolDir = File(resize2fs).parent.path;
+    // e2fsck 依赖 Termux 的 libblkid/libuuid/semaphore, 运行时从这里找库
+    const ld = 'export LD_LIBRARY_PATH="$TOOL_DIR"; ';
+    String withLib(String bin, String args) => '${ld.replaceAll('\$TOOL_DIR', toolDir)}"$bin" $args';
     final img = firmwarePath;
 
     // ---- 1. 挂载(带 setenforce 0 与 losetup 回退) ----
@@ -105,14 +109,14 @@ class FirmwareSurgeryEngine {
 
     // ---- 4. e2fsck 强制检查(防收缩损坏) ----
     onLog('运行 e2fsck -f -y(收缩前校验)...');
-    final fsck = await NativeBridge.exec('"$e2fsck" -f -y "$img" 2>&1; echo "RC=$?"');
+    final fsck = await NativeBridge.exec(withLib(e2fsck, '-f -y "$img" 2>&1; echo "RC=$?"'));
     onLog(fsck);
     if (fsck.contains('RC=1') || fsck.contains('RC=2') || fsck.contains('RC=4')) {
       onLog('⚠ e2fsck 返回异常码, 仍继续尝试收缩(可在日志里复核)');
     }
 
     // ---- 5. resize2fs -M 收缩 + 解析块数 + 截断 ----
-    final newSize = await _shrinkAndTruncate(img, resize2fs);
+    final newSize = await _shrinkAndTruncate(img, resize2fs, toolDir);
     if (newSize == null) {
       onLog('✖ resize2fs 收缩/截断失败');
       return null;
@@ -201,12 +205,13 @@ class FirmwareSurgeryEngine {
   }
 
   // ---------- resize2fs -M 收缩 + 截断 ----------
-  Future<int?> _shrinkAndTruncate(String img, String resize2fs) async {
+  Future<int?> _shrinkAndTruncate(String img, String resize2fs, String toolDir) async {
     onLog('运行 resize2fs -M(收缩到最小块数)...');
+    final cmd = 'export LD_LIBRARY_PATH="$toolDir"; "$resize2fs" -M "$img"';
     // 用 Dart Process.run 捕获 su 子进程的 stdout(便于正则解析块数)
     String out;
     try {
-      final p = await Process.run('su', ['-c', '"$resize2fs" -M "$img"'], stdoutEncoding: utf8);
+      final p = await Process.run('su', ['-c', cmd], stdoutEncoding: utf8);
       out = (p.stdout as String?) ?? '';
       if (p.exitCode != 0 && out.trim().isEmpty) {
         out = (p.stderr as String?) ?? out; // 输出可能走 stderr
@@ -214,7 +219,7 @@ class FirmwareSurgeryEngine {
     } catch (e) {
       // Process.run 在部分环境不可用时回退原生通道(同样能拿到输出)
       onLog('(Process.run 不可用, 回退原生 su 通道: $e)');
-      out = await NativeBridge.exec('"$resize2fs" -M "$img" 2>&1');
+      out = await NativeBridge.exec(cmd);
     }
     onLog(out);
 

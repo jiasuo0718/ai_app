@@ -221,59 +221,36 @@ build_payload() {
   "$TC/bin/llvm-nm" "$OUT/payload-dumper-go" 2>/dev/null | grep -c ' T lzma_' || true
 }
 
-# ---- 4. e2fsprogs: ext4 离线工具链(内置 libuuid) ----
-# debugfs(检查) / mke2fs(重打包备用) / e2fsck(校验) / resize2fs(瘦身收缩, 主线)
-# 关键: 用 ac_cv_lib_uuid_* 缓存变量绕过 configure 对外部 uuid 的错误探测,
-#       让 e2fsprogs 走它自己 src 树里的 lib/uuid 内置实现(--disable-libuuid)。
+# ---- 4. e2fsprogs: 直接下载 Termux 预编译 aarch64 二进制(不再死磕源码交叉编译) ----
+# resize2fs(瘦身收缩, 仅依赖 libc) / e2fsck(收缩前校验, 依赖 libblkid/libuuid/semaphore)
+# 依赖链: e2fsck -> libblkid.so + libuuid.so -> libandroid-posix-semaphore.so -> libc.so
 build_ext4() {
   [ -f "$OUT/resize2fs" ] && { log "e2fsprogs 已存在, 跳过"; return; }
-  log "编译 e2fsprogs (android/arm64) -> debugfs/mke2fs/e2fsck/resize2fs"
-  rm -rf "$WORK/e2fsprogs"
-  git clone --depth 1 -q -b v1.47.1 https://github.com/tytso/e2fsprogs.git "$WORK/e2fsprogs"
-  cd "$WORK/e2fsprogs"
-  export CC="$TC/bin/${TARGET}${API}-clang"
-  export AR="$TC/bin/llvm-ar"
-  export RANLIB="$TC/bin/llvm-ranlib"
-  export CFLAGS="-O2 -fPIC -Wl,--allow-multiple-definition"
-  export LDFLAGS="-L$STAGE/lib"
-  export CPPFLAGS="-I$STAGE/include"
-  export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
-  # 绕过外部 uuid/blkid 探测(OpenWrt 系常用手段), 强制走内置 lib/uuid + lib/blkid
-  export ac_cv_lib_uuid_uuid_generate=yes
-  export ac_cv_lib_uuid_uuid_unparse=yes
-  export ac_cv_lib_uuid_uuid_clear=yes
-  export ac_cv_lib_uuid_uuid_is_null=yes
-  export ac_cv_lib_uuid_uuid_compare=yes
-  export ac_cv_lib_uuid_uuid_copy=yes
-  export ac_cv_header_uuid_uuid_h=yes
-  export ac_cv_lib_blkid_blkid_get_cache=yes
-  export ac_cv_lib_blkid_blkid_devno_to_devname=yes
-  export ac_cv_lib_blkid_blkid_find_dev_with_tag=yes
-  export ac_cv_lib_blkid_blkid_probe_all=yes
-  export ac_cv_header_blkid_blkid_h=yes
-  # blkid/uuidd/nls/tls/共享库 全关, 内置 lib/uuid + lib/blkid
-  ./configure --host="$TARGET" --prefix="$STAGE" \
-      --disable-libuuid --disable-libblkid --disable-uuidd \
-      --disable-e2initrd-helper --disable-defrag --disable-nls --disable-tls \
-      --disable-elf-shlibs \
-      > configure.out 2>&1
-  rc=$?
-  echo "=== e2fsprogs configure rc=$rc ==="
-  if [ $rc -ne 0 ]; then echo "e2fsprogs configure failed:"; tail -40 configure.out; dump_configure_failure config.log; exit 1; fi
-  tail -15 configure.out
-  # 确认关键 Makefile 已生成(configure 漏生 lib/Makefile 是此前卡点)
-  for mf in Makefile lib/Makefile debugfs/Makefile resize/Makefile e2fsck/Makefile misc/Makefile; do
-    [ -f "$mf" ] || { echo "!! 缺 $mf"; }
+  log "下载 Termux 预编译 e2fsprogs (aarch64) -> resize2fs/e2fsck + 依赖库"
+  local TP="https://packages.termux.dev/apt/termux-main"
+  local PREFIX="$WORK/termux"
+  rm -rf "$PREFIX" && mkdir -p "$PREFIX"
+
+  dl_deb() { # $1=url $2=out
+    curl -fsSL -o "$2" "$1" || { echo "下载失败: $1"; exit 1; }
+  }
+
+  dl_deb "$TP/pool/main/e/e2fsprogs/e2fsprogs_1.47.4_aarch64.deb"          "$PREFIX/e2fsprogs.deb"
+  dl_deb "$TP/pool/main/libb/libblkid/libblkid_2.42.4_aarch64.deb"         "$PREFIX/libblkid.deb"
+  dl_deb "$TP/pool/main/libu/libuuid/libuuid_2.42.4_aarch64.deb"           "$PREFIX/libuuid.deb"
+  dl_deb "$TP/pool/main/liba/libandroid-posix-semaphore/libandroid-posix-semaphore_0.1-4_aarch64.deb" "$PREFIX/sem.deb"
+
+  local D="$PREFIX/data/data/com.termux/files"
+  for f in e2fsprogs libblkid libuuid sem; do
+    dpkg-deb -x "$PREFIX/$f.deb" "$PREFIX/x_$f" || { echo "解包失败 $f.deb"; exit 1; }
   done
-  # 顶层 make: 一次构建全部库与工具, 比 -C lib 更稳
-  make -j"$(nproc)" > make.out 2>&1 || { echo "e2fsprogs make failed:"; tail -50 make.out; exit 1; }
-  echo "e2fsprogs make 完成"
-  cd -
-  cp "$WORK/e2fsprogs/debugfs/debugfs" "$OUT/"
-  cp "$WORK/e2fsprogs/misc/mke2fs" "$OUT/"
-  cp "$WORK/e2fsprogs/e2fsck/e2fsck" "$OUT/"
-  cp "$WORK/e2fsprogs/resize/resize2fs" "$OUT/"
-  echo "e2fsprogs 工具就绪"
+
+  cp "$PREFIX/x_e2fsprogs/data/data/com.termux/files/usr/bin/resize2fs" "$OUT/resize2fs"
+  cp "$PREFIX/x_e2fsprogs/data/data/com.termux/files/usr/bin/e2fsck"    "$OUT/e2fsck"
+  cp "$PREFIX/x_libblkid/data/data/com.termux/files/usr/lib/libblkid.so" "$OUT/libblkid.so"
+  cp "$PREFIX/x_libuuid/data/data/com.termux/files/usr/lib/libuuid.so"   "$OUT/libuuid.so"
+  cp "$PREFIX/x_sem/data/data/com.termux/files/usr/lib/libandroid-posix-semaphore.so" "$OUT/libandroid-posix-semaphore.so"
+  echo "e2fsprogs(Termux 预编译) 工具就绪"
 }
 
 build_lz4
@@ -283,12 +260,12 @@ build_erofs
 build_ext4
 build_payload
 
-chmod 755 "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
-  "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck "$OUT"/resize2fs
+chmod 755 "$OUT"/resize2fs "$OUT"/e2fsck
+chmod 644 "$OUT"/libblkid.so "$OUT"/libuuid.so "$OUT"/libandroid-posix-semaphore.so
 
 log "=== 产物清单 ==="
 ls -la "$OUT"
 echo ""
 echo "=== 文件类型(确认 arm64) ==="
 file "$OUT"/mkfs.erofs "$OUT"/dump.erofs "$OUT"/fsck.erofs "$OUT"/payload-dumper-go \
-     "$OUT"/debugfs "$OUT"/mke2fs "$OUT"/e2fsck "$OUT"/resize2fs 2>/dev/null || true
+     "$OUT"/resize2fs "$OUT"/e2fsck "$OUT"/libblkid.so "$OUT"/libuuid.so 2>/dev/null || true
