@@ -133,7 +133,11 @@ build_payload() {
   rm -rf "$WORK/payload"
   git clone --depth 1 -q https://github.com/ssut/payload-dumper-go.git "$WORK/payload"
   cd "$WORK/payload"
-  CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags "-s -w" -o payload-dumper-go .
+  # gozstd 是 cgo 包(包装 zstd C), 必须开 CGO + NDK clang 交叉编译
+  CC="$TC/bin/${TARGET}${API}-clang" \
+  CXX="$TC/bin/${TARGET}${API}-clang++" \
+  CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+  go build -ldflags "-s -w" -o payload-dumper-go .
   cd -
   cp "$WORK/payload/payload-dumper-go" "$OUT/"
 }
