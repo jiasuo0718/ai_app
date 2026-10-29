@@ -22,7 +22,22 @@ build_lz4() {
   rm -rf "$WORK/lz4"
   git clone --depth 1 -q https://github.com/lz4/lz4.git "$WORK/lz4"
   make -C "$WORK/lz4/lib" CC="$CLANG" AR="$AR" liblz4.a -j"$(nproc)"
-  make -C "$WORK/lz4/lib" CC="$CLANG" AR="$AR" PREFIX="$STAGE" install
+  mkdir -p "$STAGE/lib/pkgconfig" "$STAGE/include"
+  cp "$WORK/lz4/lib/liblz4.a" "$STAGE/lib/"
+  cp "$WORK/lz4/lib/lz4.h" "$WORK/lz4/lib/lz4frame.h" "$WORK/lz4/lib/lz4hc.h" "$STAGE/include/" 2>/dev/null || true
+  # 手写 pkg-config(只指向静态库, 避免 .so 干扰链接)
+  cat > "$STAGE/lib/pkgconfig/liblz4.pc" <<'EOF'
+prefix=__STAGE__
+libdir=${prefix}/lib
+includedir=${prefix}/include
+Name: lz4
+Description: LZ4 compression library
+Version: 1.9
+Libs: -L${libdir} -llz4
+Cflags: -I${includedir}
+EOF
+  sed -i "s|__STAGE__|$STAGE|" "$STAGE/lib/pkgconfig/liblz4.pc"
+  echo "lz4 静态库就绪: $(ls -la "$STAGE/lib/liblz4.a" | awk '{print $5}') bytes"
 }
 
 # ---- 2. erofs-utils: mkfs.erofs / dump.erofs / fsck.erofs ----
@@ -40,7 +55,7 @@ build_erofs() {
   LDFLAGS="-pie -L$STAGE/lib" \
   LIBS="-llz4" \
   ./configure --host=aarch64-linux-android --disable-lzma \
-    || { echo "===== CONFIG.LOG (尾部) ====="; tail -60 config.log; exit 1; }
+    || { echo "===== CONFIG.LOG: 编译器自检段 ====="; grep -A25 -B5 "checking whether the C compiler works" config.log 2>/dev/null; echo "===== CONFIG.LOG: error/undefined 行 ====="; grep -nB2 -A12 -iE "error:|undefined reference|cannot find|No such file" config.log 2>/dev/null | head -80; exit 1; }
   make -j"$(nproc)"
   cd -
   cp "$WORK/erofs/mkfs/mkfs.erofs" "$OUT/"
