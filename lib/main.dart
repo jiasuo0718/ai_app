@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'engine.dart';
+import 'file_picker.dart';
 
 void main() => runApp(const FwSurgeryApp());
 
@@ -39,6 +40,33 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _checkRoot();
+  }
+
+  /// 带"打开文件夹选择"按钮的路径输入框
+  Widget _pathField(TextEditingController ctrl, String label,
+      {required bool pickDir, List<String> extensions = const []}) {
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: ctrl,
+            decoration: InputDecoration(labelText: label),
+          ),
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          icon: const Icon(Icons.folder_open),
+          tooltip: pickDir ? '选择目录' : '选择文件',
+          onPressed: () async {
+            final picked = await FilePickerPage.pick(context,
+                initialPath: '/storage/emulated/0',
+                pickDir: pickDir,
+                extensions: extensions);
+            if (picked != null) ctrl.text = picked;
+          },
+        ),
+      ],
+    );
   }
 
   Future<void> _checkRoot() async {
@@ -84,9 +112,18 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           const SizedBox(height: 12),
-          TextField(controller: _fwPathCtrl, decoration: const InputDecoration(labelText: '固件路径(OZIP/payload/system.img)')),
+          _pathField(
+            _fwPathCtrl,
+            '固件路径 (选 .img / payload 文件)',
+            pickDir: false,
+            extensions: const ['.img', '.bin', '.ozip', '.gz', '.zip'],
+          ),
           const SizedBox(height: 8),
-          TextField(controller: _outDirCtrl, decoration: const InputDecoration(labelText: '输出目录')),
+          _pathField(
+            _outDirCtrl,
+            '输出目录',
+            pickDir: true,
+          ),
           const SizedBox(height: 12),
           FilledButton.icon(
             onPressed: _running ? null : _run,

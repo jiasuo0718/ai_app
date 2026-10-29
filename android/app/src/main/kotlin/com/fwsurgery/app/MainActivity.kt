@@ -30,6 +30,10 @@ class MainActivity : FlutterActivity() {
                     val name = call.argument<String>("name") ?: asset.substringAfterLast('/')
                     result.success(copyToolToCache(asset, name))
                 }
+                "listDir" -> {
+                    val path = call.argument<String>("path") ?: "/storage/emulated/0"
+                    result.success(listDir(path))
+                }
                 else -> result.notImplemented()
             }
         }
@@ -45,6 +49,21 @@ class MainActivity : FlutterActivity() {
             Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
                 .inputStream.bufferedReader().readText().trim()
         }.getOrDefault("").let { it.contains("uid=0") || it.contains("gid=0") }
+    }
+
+    /** 用 su 列目录: 每行 "D|<完整路径>"(目录) 或 "F|<完整路径>"(文件), 兼容中文/空格路径。 */
+    private fun listDir(path: String): String {
+        return runCatching {
+            // for 循环 + glob, 路径加引号, 逐条 [ -d ]/[ -f ] 判定, 输出 D|/F| 前缀, 中文空格不会错位
+            val cmd = "for f in \"$path\"/* ; do " +
+                    "if [ -d \"\$f\" ]; then echo \"D|\$f\"; " +
+                    "elif [ -f \"\$f\" ]; then echo \"F|\$f\"; fi; done"
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val out = p.inputStream.bufferedReader().readText()
+            val err = p.errorStream.bufferedReader().readText()
+            p.waitFor()
+            (if (out.isNotBlank()) out else "") + (if (err.isNotBlank()) "\nERRSTD:$err" else "")
+        }.getOrElse { "ERR: ${it.message}" }.trim()
     }
 
     private fun runShell(cmd: String): String {

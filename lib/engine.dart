@@ -31,6 +31,18 @@ class NativeBridge {
       return 'ERR: $e';
     }
   }
+
+  /// 用 su 列出目录内容(每行 "D|路径"=目录 / "F|路径"=文件)
+  static Future<List<String>> listDir(String path) async {
+    try {
+      final raw = await _channel.invokeMethod<String>('listDir', {'path': path}) ?? '';
+      if (raw.startsWith('ERR')) return ['ERR|$raw'];
+      final lines = raw.split('\n').where((l) => l.startsWith('D|') || l.startsWith('F|')).toList();
+      return lines.isEmpty ? ['D|/'] : lines;
+    } catch (e) {
+      return ['ERR|$e'];
+    }
+  }
 }
 
 /// 固件手术流水线: 拆包 -> 手术(patch) -> 重打包 -> 输出 system.img
