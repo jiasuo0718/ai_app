@@ -166,6 +166,28 @@ EOF
   echo "liblzma: $(ls -la "$STAGE/lib/liblzma.a" | awk '{print $5}') bytes, 头文件 OK"
 }
 
+# ---- 2.6 qsort_r 兼容桩: bionic API<28 无 qsort_r, zstd dictBuilder(cover.c) 需要 ----
+build_qsortr() {
+  [ -f "$STAGE/lib/libqsortr.a" ] && { log "libqsortr 已存在, 跳过"; return; }
+  log "编译 qsort_r 兼容桩 (bionic API<28 无此符号)"
+  cat > "$WORK/qsortr.c" <<'EOF'
+#include <stdlib.h>
+/* glibc 签名: int cmp(const void*, const void*, void*) */
+static _Thread_local void *g_arg;
+static _Thread_local int (*g_cmp)(const void *, const void *, void *);
+static int cmp_wrap(const void *a, const void *b) { return g_cmp(a, b, g_arg); }
+void qsort_r(void *base, size_t nmemb, size_t size,
+             int (*compar)(const void *, const void *, void *), void *arg) {
+  g_arg = arg; g_cmp = compar;
+  qsort(base, nmemb, size, cmp_wrap);
+}
+EOF
+  "$TC/bin/${TARGET}${API}-clang" -c "$WORK/qsortr.c" -o "$WORK/qsortr.o"
+  "$TC/bin/llvm-ar" rcs "$STAGE/lib/libqsortr.a" "$WORK/qsortr.o"
+  "$TC/bin/llvm-ranlib" "$STAGE/lib/libqsortr.a"
+  echo "libqsortr 桩: $STAGE/lib/libqsortr.a"
+}
+
 # ---- 3. payload-dumper-go ----
 build_payload() {
   [ -f "$OUT/payload-dumper-go" ] && { log "payload-dumper-go 已存在, 跳过"; return; }
@@ -183,9 +205,9 @@ build_payload() {
   export CGO_LDFLAGS="--sysroot=$TC/sysroot -L$STAGE/lib -llog -lm"
   export CGO_LDFLAGS_ALLOW='.*'
   # -linkmode external: 必须, 否则 liblzma 不会链进去
-  # bionic 无静态 libc, 不能全 -static; 只把 liblzma 静态(-Bstatic), libc/liblog/libm 走动态
+  # bionic 无静态 libc, 不能全 -static; 只把 qsortr+lzma 静态(-Bstatic), libc/liblog/libm 走动态
   go build -trimpath -buildvcs=false -tags 'netgo osusergo' \
-    -ldflags="-s -w -linkmode external -extldflags '-Wl,-Bstatic -llzma -Wl,-Bdynamic'" \
+    -ldflags="-s -w -linkmode external -extldflags '-Wl,-Bstatic -lqsortr -llzma -Wl,-Bdynamic'" \
     -o payload-dumper-go .
   cd -
   cp "$WORK/payload/payload-dumper-go" "$OUT/"
@@ -201,6 +223,7 @@ build_payload() {
 
 build_lz4
 build_lzma
+build_qsortr
 build_erofs
 build_payload
 
