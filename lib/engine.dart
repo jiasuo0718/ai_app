@@ -110,7 +110,7 @@ class FirmwareSurgeryEngine {
 
     // ---- 4. e2fsck 强制检查(防收缩损坏) ----
     onLog('运行 e2fsck -f -y(收缩前校验)...');
-    final fsck = await NativeBridge.exec(withLib(e2fsck, '-f -y "$img" 2>&1; echo "RC=$?"'));
+    final fsck = await NativeBridge.exec(withLib(e2fsck, '-f -y "$img" 2>&1; echo "RC=\$?"'));
     onLog(fsck);
     if (fsck.contains('RC=1') || fsck.contains('RC=2') || fsck.contains('RC=4')) {
       onLog('⚠ e2fsck 返回异常码, 仍继续尝试收缩(可在日志里复核)');
