@@ -1,0 +1,122 @@
+import 'package:flutter/services.dart';
+
+/// 原生通道: 见 android/.../MainActivity.kt
+class NativeBridge {
+  static const _channel = MethodChannel('fw_surgery/engine');
+
+  /// 是否已 root
+  static Future<bool> checkRoot() async {
+    try {
+      return await _channel.invokeMethod<bool>('checkRoot') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 用 su 执行命令
+  static Future<String> exec(String command) async {
+    try {
+      return await _channel.invokeMethod<String>('exec', {'command': command}) ?? '';
+    } catch (e) {
+      return 'ERR: $e';
+    }
+  }
+
+  /// 把捆绑的 arm64 工具拷到可执行缓存目录
+  static Future<String> copyTool(String asset, String name) async {
+    try {
+      return await _channel
+          .invokeMethod<String>('copyTool', {'asset': asset, 'name': name}) ?? '';
+    } catch (e) {
+      return 'ERR: $e';
+    }
+  }
+}
+
+/// 固件手术流水线: 拆包 -> 手术(patch) -> 重打包 -> 输出 system.img
+///
+/// 手术 profile 是"可编辑的补丁配置", 见 [PatchProfile]。
+/// 第一版先搭起流水线与 UI, 各阶段真实命令按固件类型(erofs/ext4)填实。
+class FirmwareSurgeryEngine {
+  FirmwareSurgeryEngine({required this.onLog});
+
+  /// 回调用于把每行输出推给 UI
+  final void Function(String line) onLog;
+
+  Future<String?> runPipeline({required String firmwarePath, required String outDir}) async {
+    onLog('固件: $firmwarePath');
+    onLog('输出目录: $outDir');
+
+    if (!await NativeBridge.checkRoot()) {
+      onLog('✖ 未检测到 root，无法执行手术。');
+      return null;
+    }
+    onLog('✔ root 正常');
+
+    final tool = await NativeBridge.copyTool('assets/tools/payload-dumper-go', 'payload-dumper-go');
+    if (tool.startsWith('ERR:')) {
+      onLog('✖ 工具准备失败: $tool');
+      return null;
+    }
+    onLog('✔ 工具就绪: $tool');
+
+    // ---- 1. 拆包 ----
+    final unpack = await NativeBridge.exec('mkdir -p "$outDir" && "$tool" extract --partition system -o "$outDir/system" "$firmwarePath" 2>&1 || echo UNPACK_FAIL');
+    onLog(unpack);
+
+    // ---- 2. 手术(patch) ----
+    final patch = await applyPatch(systemDir: '$outDir/system');
+    if (!patch.ok) {
+      onLog('✖ 手术失败: ${patch.msg}');
+      return null;
+    }
+    onLog('✔ 手术完成');
+
+    // ---- 3. 重打包(erofs) ----
+    final outImg = '$outDir/system.img';
+    final repack = await NativeBridge.exec(
+        'mkfs.erofs -zlz4hc "$outImg" "$outDir/system" 2>&1 || echo REPACK_FAIL');
+    onLog(repack);
+
+    onLog('✔ 手术结束，产物: $outImg');
+    return outImg;
+  }
+
+  /// 手术补丁: 关 ColorOS 的 OPPO 组件 + 调 props + 精简。
+  /// 真实改法按固件内容填实(改 build.prop / init rc / 删冗余)。
+  Future<({bool ok, String msg})> applyPatch({required String systemDir}) async {
+    // TODO(迭代): 落到具体文件——
+    //   1) 编辑 systemDir/build.prop: 关 OPPO 看门狗/遥测/性能组件, 降 dexopt 内存峰值
+    //   2) 停用/删除 vendor 里 nwatchcall / atlas / oplusperfcount 等
+    //   3) 精简冗余 app/模块, 减小 system 体积与首启内存
+    onLog('执行 ColorOS 手术 profile...');
+    return (ok: true, msg: 'patch profile 已执行(待填实)');
+  }
+}
+
+/// 手术补丁配置。用可编辑的数据描述要改什么，换固件不重编 app。
+class PatchProfile {
+  final String name;
+  final List<String> setProps; // 要写入 build.prop 的 ro./persist. 键值
+  final List<String> disableServices; // 要停用/删除的厂商 daemon 二进制名
+
+  const PatchProfile({
+    required this.name,
+    this.setProps = const [],
+    this.disableServices = const [],
+  });
+
+  static const colorOS15 = PatchProfile(
+    name: 'ColorOS 15 手术',
+    setProps: [
+      // 关 OPPO 看门狗/遥测(按固件实际 gate 键调整)
+      'persist.sys.oplus.nwatchcall.disable=true',
+      'persist.vendor.atlas.disable=true',
+      'persist.sys.oplus.perf.disable=true',
+      'ro.sys.selinux=permissive',
+    ],
+    disableServices: [
+      'nwatchcall', 'atlas', 'atlasservice', 'oplusperfcount', 'oplus_',
+    ],
+  );
+}

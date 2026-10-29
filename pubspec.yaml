@@ -1,35 +1,25 @@
-name: ai_chat_app
-description: AI多角色聊天客户端 - 仿微信UI
-version: 1.0.0+1
-publish_to: none
+name: fw_surgery
+description: 固件手术刀 —— root 环境下在手机本地拆包、手术(patch)、重打包固件，产出 AEmulator 可导入的 system.img。
+publish_to: 'none'
+version: 0.1.0
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
-  flutter: ">=3.10.0"
 
 dependencies:
   flutter:
     sdk: flutter
-  cupertino_icons: ^1.0.6
-  # 本地存储
-  shared_preferences: ^2.2.2
-  # 网络请求
-  dio: ^5.4.0
-  # 语音播放
-  audioplayers: ^5.2.1
-  # 录音
-  record: ^6.2.1
-  # 路径管理
-  path_provider: ^2.1.2
-  # 权限
-  permission_handler: ^11.2.0
-  # 图片选择(头像)
-  image_picker: ^1.0.7
-  # UUID
-  uuid: ^4.3.3
+
+  # 常用可选: 文件选择/路径，后续迭代按需加入
+  # path_provider: ^2.1.0
+  # file_picker: ^8.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
-  
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/tools/
