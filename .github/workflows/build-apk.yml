@@ -1,54 +1,41 @@
-name: Build Flutter APK
+name: Build Debug APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-apk:
+    name: Compile AceVM Debug APK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - name: Set up Gradle cache
+        uses: actions/cache@v4
         with:
-          flutter-version: '3.24.5'
-          channel: 'stable'
-          cache: true
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts') }}
+          restore-keys: ${{ runner.os }}-gradle
 
-      - name: Build native tools (android/arm64)
-        run: |
-          chmod +x scripts/build-native-tools.sh
-          NDK_HOME="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/* 2>/dev/null | head -1)"
-          if [ -z "$NDK_HOME" ]; then
-            echo "无预装 NDK, 下载 r25c..."
-            wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O /tmp/ndk.zip
-            unzip -q /tmp/ndk.zip -d /opt/
-            NDK_HOME="/opt/android-ndk-r25c"
-          fi
-          echo "使用 NDK: $NDK_HOME"
-          ./scripts/build-native-tools.sh "$NDK_HOME"
+      - name: Grant execute permission
+        run: chmod +x gradlew
 
-      - name: Install dependencies
-        run: flutter pub get
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
 
-      - name: Setup local.properties
-        run: echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
-
-      - name: Build release APK
-        run: flutter build apk --release
-
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
-          
+          name: acevm-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
